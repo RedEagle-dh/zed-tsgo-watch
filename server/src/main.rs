@@ -52,12 +52,10 @@ struct Options {
 
 impl Options {
     fn from_json(value: Option<&serde_json::Value>) -> Self {
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
+        // One compiler at a time: each one can take gigabytes for a large project.
         let mut options = Self {
             suppress_open: true,
-            concurrency: (cores / 4).clamp(1, 4),
+            concurrency: 1,
         };
         if let Some(value) = value {
             match value.get("openFiles").and_then(|v| v.as_str()) {

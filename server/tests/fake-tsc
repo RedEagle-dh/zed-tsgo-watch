@@ -1,0 +1,28 @@
+#!/bin/sh
+# Stands in for the compiler in tests that control how long a check takes. It appends
+# `start <pid>` and `end <pid>` to $FAKE_TSC_DIR/log and runs until $FAKE_TSC_DIR/gate exists.
+# Its only diagnostic names the number of the run.
+dir=$FAKE_TSC_DIR
+runs=0
+previous=
+if [ -e "$dir/log" ]; then
+  while read -r event pid; do
+    if [ "$event" = start ]; then
+      runs=$((runs + 1))
+      previous=$pid
+    fi
+  done < "$dir/log"
+fi
+# The compiler that started before this one must be gone.
+if [ -n "$previous" ] && kill -0 "$previous" 2> /dev/null; then
+  echo "overlap $$" >> "$dir/log"
+fi
+echo "start $$" >> "$dir/log"
+while [ ! -e "$dir/gate" ]; do
+  # The test is over and nothing stopped this script.
+  [ -d "$dir" ] || exit 1
+  # Without the output pipes, so that killing this script closes them at once.
+  sleep 0.02 > /dev/null 2>&1
+done
+echo "end $$" >> "$dir/log"
+echo "error TS1000: run $((runs + 1))"

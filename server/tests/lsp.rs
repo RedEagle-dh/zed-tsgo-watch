@@ -1,7 +1,8 @@
 //! Starts the real server over stdio against fixture workspaces and checks what it publishes.
 //!
 //! Needs a TypeScript 7 compiler binary in `TSGO_WATCH_TEST_TSC`. Without it the tests are
-//! skipped, unless `CI` is set, in which case they fail.
+//! skipped, unless `CI` is set, in which case they fail. The tests about when compilers start
+//! and stop use the script `tests/fake-tsc` instead and always run, on Unix.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -161,9 +162,22 @@ impl Client {
     /// `refresh` advertises support for `workspace/diagnostic/refresh`, as Zed does.
     fn start_with(workspace: &Workspace, options: Value, refresh: bool) -> Self {
         let tsc = compiler().expect("compiler");
+        Self::spawn(workspace, options, refresh, &tsc, None)
+    }
+
+    /// Starts the server with `compiler` for every project. `fake_dir` is where `fake-tsc`
+    /// keeps its log.
+    fn spawn(
+        workspace: &Workspace,
+        options: Value,
+        refresh: bool,
+        compiler: &Path,
+        fake_dir: Option<&Path>,
+    ) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_tsgo-watch-lsp"))
             .arg("--fallback-compiler")
-            .arg(&tsc)
+            .arg(compiler)
+            .envs(fake_dir.map(|dir| ("FAKE_TSC_DIR", dir)))
             .env("XDG_CACHE_HOME", &workspace.cache)
             .env("HOME", &workspace.cache)
             .env("LOCALAPPDATA", &workspace.cache)
@@ -805,6 +819,67 @@ fn changes_reported_through_a_workspace_symlink_are_followed() {
     client.wait_until("error fixed through the link", |c| {
         c.messages_for("packages/ui/src/index.ts").is_empty()
     });
+    client.shutdown();
+}
+
+/// The log and the gate of `tests/fake-tsc`.
+#[cfg(unix)]
+struct FakeCompiler(TempDir);
+
+#[cfg(unix)]
+impl FakeCompiler {
+    fn start(workspace: &Workspace, name: &str) -> (Self, Client) {
+        let fake = Self(TempDir::new(name));
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fake-tsc");
+        let client = Client::spawn(workspace, Value::Null, false, &script, Some(&fake.0.0));
+        (fake, client)
+    }
+
+    /// What the compilers logged so far, in order: `start`, `end`, and `overlap` for one that
+    /// started while the one before it was still alive.
+    fn events(&self) -> Vec<String> {
+        std::fs::read_to_string(self.0.0.join("log"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.split(' ').next())
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn wait_for(&self, expected: &[&str]) {
+        let deadline = Instant::now() + TIMEOUT;
+        while self.events() != expected {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {expected:?}, got {:?}",
+                self.events()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Lets every compiler run to its end from now on.
+    fn open_gate(&self) {
+        std::fs::write(self.0.0.join("gate"), "").unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn one_compiler_runs_at_a_time() {
+    // Three projects that all want to be checked at the start.
+    let workspace = Workspace::new("ws");
+    let (fake, mut client) = FakeCompiler::start(&workspace, "one-at-a-time");
+    fake.wait_for(&["start"]);
+    // The first compiler runs until the gate opens. No other one may start meanwhile.
+    client.settle(Duration::from_millis(500));
+    assert_eq!(fake.events(), ["start"]);
+    fake.open_gate();
+    client.wait_checks();
+    assert_eq!(
+        fake.events(),
+        ["start", "end", "start", "end", "start", "end"]
+    );
     client.shutdown();
 }
 
