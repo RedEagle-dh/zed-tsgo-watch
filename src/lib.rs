@@ -135,9 +135,15 @@ impl TsgoWatch {
                 &zed::LanguageServerInstallationStatus::Downloading,
             );
             fs::create_dir_all(&dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
-            zed::download_file(&asset.download_url, &path, zed::DownloadedFileType::Gzip)
+            // Only a complete download gets the final name; an interrupted one is replaced on
+            // the next start.
+            let partial = format!("{path}.download");
+            let _ = fs::remove_file(&partial);
+            zed::download_file(&asset.download_url, &partial, zed::DownloadedFileType::Gzip)
                 .map_err(|e| missing_server(&format!("the download failed: {e}")))?;
-            zed::make_file_executable(&path)?;
+            zed::make_file_executable(&partial)?;
+            fs::rename(&partial, &path)
+                .map_err(|e| format!("cannot move {partial} to {path}: {e}"))?;
             for entry in fs::read_dir(".").into_iter().flatten().flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if name.starts_with(SERVER_DIR_PREFIX) && name != dir {
