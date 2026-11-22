@@ -295,6 +295,8 @@ impl State {
                 continue;
             }
             let diagnostics = match self.owner(file) {
+                // A stale owner shows nothing until a successful check replaces its result.
+                Some(owner) if self.projects[owner].stale => continue,
                 Some(owner) => self.projects[owner]
                     .diagnostics
                     .get(file)
@@ -691,6 +693,57 @@ mod tests {
         assert_eq!(
             summary(&state.take_changes()),
             vec![("/w/tsconfig.json".into(), vec!["root config".into()])]
+        );
+    }
+
+    #[test]
+    fn a_stale_owner_shows_nothing_until_its_next_check() {
+        let root = (p("/w/tsconfig.json"), tsc());
+        let ui = (p("/w/packages/ui/tsconfig.json"), tsc());
+        let web = (p("/w/apps/web/tsconfig.json"), tsc());
+        let a = "/w/packages/ui/a.ts";
+        let mut state = State::new(p("/w"), true);
+        state.set_projects(vec![root.clone(), ui.clone(), web.clone()]);
+        state.schedule(10);
+        state.finish(&root.0, result(&[a], &[(a, 0, "old")]));
+        state.finish(&ui.0, result(&[a], &[(a, 0, "old")]));
+        // web reports the file while checking its dependency.
+        state.finish(
+            &web.0,
+            result(&["/w/apps/web/main.ts", a], &[(a, 0, "old")]),
+        );
+        state.take_changes();
+
+        // The root shadows the packages: it owns nothing, so it goes stale.
+        state.file_changed(Path::new(a), Change::Changed);
+        assert_eq!(
+            start(&mut state, 10),
+            vec!["/w/apps/web/tsconfig.json", "/w/packages/ui/tsconfig.json"]
+        );
+        assert!(state.projects[state.index_of(&root.0).unwrap()].stale);
+        state.finish(&ui.0, result(&[a], &[(a, 0, "new")]));
+        state.finish(
+            &web.0,
+            result(&["/w/apps/web/main.ts", a], &[(a, 0, "new")]),
+        );
+        assert_eq!(
+            summary(&state.take_changes()),
+            vec![(a.into(), vec!["new".into()])]
+        );
+
+        // ui's config is removed, so the stale root owns the file. Its old result stays hidden
+        // while its check runs, although web still reports the file.
+        state.set_projects(vec![root.clone(), web]);
+        assert_eq!(state.owner(Path::new(a)), state.index_of(&root.0));
+        assert_eq!(
+            start(&mut state, 10),
+            vec!["/w/apps/web/tsconfig.json", "/w/tsconfig.json"]
+        );
+        assert_eq!(summary(&state.take_changes()), vec![(a.into(), vec![])]);
+        state.finish(&root.0, result(&[a], &[(a, 0, "new")]));
+        assert_eq!(
+            summary(&state.take_changes()),
+            vec![(a.into(), vec!["new".into()])]
         );
     }
 
