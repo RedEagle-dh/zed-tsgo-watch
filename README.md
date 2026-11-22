@@ -81,7 +81,9 @@ any compiler the server says so once and stays idle.
 - **Projects.** Every `tsconfig.json` in the worktree is a project (`.gitignore` is respected;
   `node_modules` and hidden directories are skipped), plus every config reachable through
   `references` (for example Vite's `tsconfig.app.json` and `tsconfig.node.json`). A change to a
-  `tsconfig*.json`, `package.json` or lockfile re-discovers the projects and re-checks all of them.
+  `tsconfig*.json`, `package.json` or lockfile re-discovers the projects and re-checks all of them,
+  and so does a change to any other `.json` file that no program contains (a shared base config
+  such as `packages/typescript-config/base.json`, or a referenced config created later).
 - **Checks.** `tsc -p <tsconfig> --noEmit --pretty false --incremental --tsBuildInfoFile <cache>
   --listFiles`, run in the tsconfig's directory. The build info goes to the user cache directory
   (`$XDG_CACHE_HOME` or `~/.cache`, `~/Library/Caches`, `%LOCALAPPDATA%`) under `tsgo-watch/`, so
@@ -89,7 +91,9 @@ any compiler the server says so once and stays idle.
 - **Triggers.** Zed reports changes on disk through `workspace/didChangeWatchedFiles` (saves,
   `git checkout`, formatters, other tools). Events are debounced for 150 ms. A changed file
   re-checks the projects whose last file list contains it; a new, deleted or unknown file also
-  re-checks the projects whose directory contains it. Unsaved edits are not checked.
+  re-checks the projects whose directory contains it. A file that no program contains and that
+  `.gitignore` excludes (build output in `dist/`, `.next/`, `.turbo/`) is ignored; a file that a
+  program contains counts even when it is gitignored. Unsaved edits are not checked.
 - **Ownership.** When configs overlap (a root config that is also the base of package configs),
   each file is reported by one project: the deepest config directory above the file whose program
   contains it. Files that no such project contains get the de-duplicated union. A dirty project
@@ -130,6 +134,12 @@ Zed runs, which is why tsgo-watch runs one-shot checks instead.
 - JavaScript files with `checkJs` are reported, but the server is registered for TypeScript and
   TSX only, so an open JavaScript file is not suppressed.
 - Old build info files stay in the cache directory after a project is gone.
+- Zed reports changes inside a gitignored directory only after that directory was expanded in the
+  project panel. A generated file that a tsconfig includes from there (such as
+  `.next/types/**/*.ts`) is picked up when something else re-checks its project.
+- With `preserveSymlinks: true` in a tsconfig, files reached through workspace symlinks are listed
+  under their `node_modules` link path and are not tracked, so a change in such a package does not
+  re-check its consumers.
 
 ## Development
 
