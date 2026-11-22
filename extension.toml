@@ -1,0 +1,11 @@
+id = "tsgo-watch"
+name = "tsgo-watch"
+description = "Whole-project TypeScript 7 diagnostics: errors in files you have not opened."
+version = "0.1.0"
+schema_version = 1
+authors = ["David Hermann"]
+repository = "https://github.com/RedEagle-dh/zed-tsgo-watch"
+
+[language_servers.tsgo-watch]
+name = "tsgo-watch"
+languages = ["TypeScript", "TSX"]
