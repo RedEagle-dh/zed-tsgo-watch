@@ -93,9 +93,11 @@ Without any compiler the server says so once and stays idle.
 - **Triggers.** Zed reports changes on disk through `workspace/didChangeWatchedFiles` (saves,
   `git checkout`, formatters, other tools). Events are debounced for 150 ms. A changed file
   re-checks the projects whose last file list contains it; a new, deleted or unknown file also
-  re-checks the projects whose directory contains it. A file that no program contains and that
-  `.gitignore` excludes (build output in `dist/`, `.next/`, `.turbo/`) is ignored; a file that a
-  program contains counts even when it is gitignored. Unsaved edits are not checked.
+  re-checks the projects whose directory contains it. A JavaScript or JSON file that no program
+  contains and that `.gitignore` excludes (build output in `dist/`, `.next/`, `.turbo/`) is
+  ignored. A file that a program contains counts even when it is gitignored, and so does every
+  `.ts`, `.tsx`, `.mts` and `.cts` file, so that a new generated source (a gitignored
+  `src/api.gen.ts`) is checked when it appears. Unsaved edits are not checked.
 - **Ownership.** When configs overlap (a root config that is also the base of package configs),
   each file is reported by one project: the deepest config directory above the file whose program
   contains it. Files that no such project contains get the de-duplicated union. A dirty project
@@ -137,7 +139,7 @@ Zed runs, which is why tsgo-watch runs one-shot checks instead.
   TSX only, so an open JavaScript file is not suppressed.
 - Old build info files stay in the cache directory after a project is gone.
 - Zed reports changes inside a gitignored directory only after that directory was expanded in the
-  project panel. A generated file that a tsconfig includes from there (such as
+  project panel. Until then, a generated file that a tsconfig includes from there (such as
   `.next/types/**/*.ts`) is picked up when something else re-checks its project.
 - With `preserveSymlinks: true` in a tsconfig, files reached through workspace symlinks are listed
   under their `node_modules` link path and are not tracked, so a change in such a package does not

@@ -955,17 +955,24 @@ fn gitignored_files_count_only_when_a_program_contains_them() {
         return;
     }
     let workspace = Workspace::new("single");
-    workspace.write(".gitignore", "dist/\nsrc/generated.ts\n");
+    workspace.write(".gitignore", "dist/\nsrc/generated.ts\n*.gen.ts\n");
     workspace.write("src/generated.ts", "export const generated: number = 1;\n");
+    workspace.write(
+        "src/client.ts",
+        "import { api } from \"./api.gen\";\nexport const url: string = api;\n",
+    );
     let mut client = Client::start(&workspace, Value::Null);
     client.wait_checks();
-    assert_eq!(client.files_with_diagnostics(), vec!["src/broken.ts"]);
+    assert_eq!(
+        client.files_with_diagnostics(),
+        vec!["src/broken.ts", "src/client.ts"]
+    );
 
     // Build output written by a bundler or dev server: no check, not even for JSON files.
     let ends = client.progress_ends;
     let output = [
         "dist/index.js",
-        "dist/index.d.ts",
+        "dist/index.mjs",
         "dist/stats.json",
         "dist/package.json",
     ];
@@ -975,6 +982,13 @@ fn gitignored_files_count_only_when_a_program_contains_them() {
     }
     client.settle(Duration::from_millis(1000));
     assert_eq!(client.progress_ends, ends, "no check for build output");
+
+    // A gitignored TypeScript file that the tsconfig includes is checked when it is created.
+    workspace.write("src/api.gen.ts", "export const api: string = 1;\n");
+    client.change("src/api.gen.ts", CREATED);
+    client.wait_until("error in the created generated file", |c| {
+        !c.messages_for("src/api.gen.ts").is_empty() && c.messages_for("src/client.ts").is_empty()
+    });
 
     // A gitignored file that the program contains is checked.
     workspace.write(

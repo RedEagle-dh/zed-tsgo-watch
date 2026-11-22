@@ -345,15 +345,20 @@ impl<'a> Server<'a> {
             if in_node_modules(&path) || !self.root.contains_real(&path) {
                 continue;
             }
-            // Build output and other gitignored files count only when a program contains them.
-            let in_fileset = self.state.in_fileset(&path);
-            if !in_fileset && self.ignores.is_ignored(&self.root.real, &path) {
-                continue;
-            }
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy())
                 .unwrap_or_default();
+            // Build output and other gitignored files count only when a program contains them.
+            // TypeScript sources always count: a new generated source that a tsconfig includes
+            // cannot be in a file list yet.
+            let typescript = [".ts", ".tsx", ".mts", ".cts"]
+                .iter()
+                .any(|ext| name.ends_with(ext));
+            let in_fileset = self.state.in_fileset(&path);
+            if !in_fileset && !typescript && self.ignores.is_ignored(&self.root.real, &path) {
+                continue;
+            }
             if name == "package.json"
                 || LOCKFILES.contains(&name.as_ref())
                 || (name.starts_with("tsconfig") && name.ends_with(".json"))
