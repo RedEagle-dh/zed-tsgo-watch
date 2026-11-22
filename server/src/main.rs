@@ -21,7 +21,7 @@ use lsp_types::{
 };
 use serde_json::json;
 
-use crate::paths::{RootMap, in_node_modules, path_to_uri, uri_to_path};
+use crate::paths::{RootMap, in_node_modules, path_to_uri, real_file_path, uri_to_path};
 use crate::runner::{Done, Job, Runner};
 use crate::state::{Change, State};
 
@@ -325,7 +325,8 @@ impl<'a> Server<'a> {
         self.deadline = None;
         let mut rediscover = false;
         for (path, change) in std::mem::take(&mut self.events) {
-            if in_node_modules(&path) {
+            let path = real_file_path(&path);
+            if in_node_modules(&path) || !self.root.contains_real(&path) {
                 continue;
             }
             let name = path

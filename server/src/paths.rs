@@ -51,6 +51,15 @@ pub fn realpath(path: &Path) -> Option<PathBuf> {
     Some(normalize(&stripped))
 }
 
+/// The real path of a file that may sit below a symlinked directory (bun links workspace
+/// packages into `node_modules`, and Zed can report changes under that link). A deleted file
+/// resolves through its parent directory. Falls back to `path`.
+pub fn real_file_path(path: &Path) -> PathBuf {
+    realpath(path)
+        .or_else(|| Some(realpath(path.parent()?)?.join(path.file_name()?)))
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
 /// Joins a path printed by tsc (relative to `cwd` or absolute) onto `cwd`.
 pub fn resolve(cwd: &Path, printed: &str) -> PathBuf {
     normalize(&cwd.join(printed))
@@ -216,6 +225,33 @@ mod tests {
             map.to_client(Path::new("/elsewhere/a.ts")),
             PathBuf::from("/elsewhere/a.ts")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_files_below_symlinked_directories() {
+        let dir = std::env::temp_dir().join(format!("tsgo-watch-paths-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("packages/ui/src")).unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/@acme")).unwrap();
+        std::os::unix::fs::symlink(dir.join("packages/ui"), dir.join("node_modules/@acme/ui"))
+            .unwrap();
+        std::fs::write(dir.join("packages/ui/src/a.ts"), "").unwrap();
+        let real = realpath(&dir).unwrap();
+        let linked = dir.join("node_modules/@acme/ui/src");
+        assert_eq!(
+            real_file_path(&linked.join("a.ts")),
+            real.join("packages/ui/src/a.ts")
+        );
+        assert_eq!(
+            real_file_path(&linked.join("gone.ts")),
+            real.join("packages/ui/src/gone.ts")
+        );
+        assert_eq!(
+            real_file_path(Path::new("/does/not/exist.ts")),
+            PathBuf::from("/does/not/exist.ts")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

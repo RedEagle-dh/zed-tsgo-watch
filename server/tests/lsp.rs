@@ -692,3 +692,35 @@ fn config_errors_go_on_the_tsconfig() {
     });
     client.shutdown();
 }
+
+#[cfg(unix)]
+#[test]
+fn changes_reported_through_a_workspace_symlink_are_followed() {
+    if compiler().is_none() {
+        return;
+    }
+    // bun links workspace packages into node_modules, and Zed may report a change under the link.
+    let workspace = Workspace::new("ws");
+    std::fs::create_dir_all(workspace.path("apps/web/node_modules/@acme")).unwrap();
+    std::os::unix::fs::symlink(
+        "../../../../packages/ui",
+        workspace.path("apps/web/node_modules/@acme/ui"),
+    )
+    .unwrap();
+    let mut client = Client::start(&workspace, Value::Null);
+    client.wait_checks();
+    assert_eq!(client.messages_for("packages/ui/src/index.ts").len(), 1);
+    let original = std::fs::read_to_string(workspace.path("packages/ui/src/index.ts")).unwrap();
+    workspace.write(
+        "packages/ui/src/index.ts",
+        &original.replace(
+            "export const uiBroken: number = \"ui\";",
+            "export const uiFixed = 1;",
+        ),
+    );
+    client.change("apps/web/node_modules/@acme/ui/src/index.ts", CHANGED);
+    client.wait_until("error fixed through the link", |c| {
+        c.messages_for("packages/ui/src/index.ts").is_empty()
+    });
+    client.shutdown();
+}
