@@ -6,5 +6,6 @@ mod compiler;
 mod discover;
 mod output;
 mod paths;
+mod state;
 
 fn main() {}
