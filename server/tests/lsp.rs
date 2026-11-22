@@ -222,7 +222,7 @@ impl Client {
                     "window": { "workDoneProgress": true },
                     "workspace": {
                         "didChangeWatchedFiles": { "dynamicRegistration": true },
-                        "diagnostic": { "refreshSupport": refresh }
+                        "diagnostics": { "refreshSupport": refresh }
                     }
                 },
                 "initializationOptions": options

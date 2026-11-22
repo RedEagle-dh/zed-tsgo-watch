@@ -528,6 +528,11 @@ fn main() {
         log("connection closed before initialize");
         return;
     };
+    // The spec names this `workspace.diagnostics`; lsp-types 0.97 reads `diagnostic`.
+    let refresh_supported = params
+        .pointer("/capabilities/workspace/diagnostics/refreshSupport")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let params: InitializeParams = match serde_json::from_value(params) {
         Ok(params) => params,
         Err(error) => {
@@ -536,13 +541,6 @@ fn main() {
         }
     };
     let options = Options::from_json(params.initialization_options.as_ref());
-    let refresh_supported = params
-        .capabilities
-        .workspace
-        .as_ref()
-        .and_then(|w| w.diagnostic.as_ref())
-        .and_then(|d| d.refresh_support)
-        .unwrap_or(false);
     let progress_supported = params
         .capabilities
         .window
