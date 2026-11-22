@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+mod compiler;
+mod discover;
 mod output;
 mod paths;
 
