@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Sender;
 use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 
-use crate::output::{self, Category, Output};
+use crate::output::{self, Category, Output, RawDiagnostic};
 use crate::paths::{in_node_modules, normalize, resolve};
 use crate::state::CheckResult;
 
@@ -176,9 +176,24 @@ fn severity(category: Category) -> DiagnosticSeverity {
     }
 }
 
+/// TS2589, "Type instantiation is excessively deep and possibly infinite."
+const INSTANTIATION_TOO_DEEP: u32 = 2589;
+
+/// Whether a diagnostic comes from the incremental bookkeeping instead of the check.
+///
+/// Starting from an older build info, the compiler computes a declaration signature for every
+/// changed file. For a file that exports a very large inferred type (an Elysia app), that can
+/// report TS2589 although checking the file does not: a check without build info is clean, and
+/// so is the next incremental run. Such a TS2589 has no location, because no node is being
+/// checked. One that the check itself reports has a location and is kept.
+fn is_bookkeeping_noise(diagnostic: &RawDiagnostic) -> bool {
+    diagnostic.file.is_none() && diagnostic.code == INSTANTIATION_TOO_DEEP
+}
+
 /// Converts parsed output into a check result, with ranges that end at the end of the word at
 /// the reported position.
-pub fn summarize(parsed: Output, cwd: &Path, config: &Path, root: &Path) -> Summary {
+pub fn summarize(mut parsed: Output, cwd: &Path, config: &Path, root: &Path) -> Summary {
+    parsed.diagnostics.retain(|d| !is_bookkeeping_noise(d));
     let listed = parsed.files.len();
     let files = parsed
         .files
@@ -296,5 +311,25 @@ src/main.ts(1,1): warning TS6133: unused\n\
         );
         assert_eq!(d[2].1.severity, Some(DiagnosticSeverity::WARNING));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn summarize_drops_instantiation_depth_without_location() {
+        let root = normalize(Path::new("/w"));
+        let cwd = root.join("app");
+        let config = cwd.join("tsconfig.json");
+        let stdout = "\
+error TS2589: Type instantiation is excessively deep and possibly infinite.
+error TS2688: Cannot find type definition file for 'bun'.
+src/main.ts(3,5): error TS2589: Type instantiation is excessively deep and possibly infinite.
+";
+        let summary = summarize(output::parse(stdout), &cwd, &config, &root);
+        assert_eq!(summary.errors, 2);
+        let d = &summary.result.diagnostics;
+        assert_eq!(d.len(), 2);
+        assert_eq!(d[0].0, config);
+        assert_eq!(d[0].1.code, Some(NumberOrString::Number(2688)));
+        assert_eq!(d[1].0, root.join("app/src/main.ts"));
+        assert_eq!(d[1].1.code, Some(NumberOrString::Number(2589)));
     }
 }

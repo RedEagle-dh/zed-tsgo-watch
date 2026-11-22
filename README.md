@@ -98,7 +98,11 @@ as a fallback. Without any compiler the server says so once and stays idle.
 - **Checks.** `tsc -p <tsconfig> --noEmit --pretty false --incremental --tsBuildInfoFile <cache>
   --listFiles`, run in the tsconfig's directory. The build info goes to the user cache directory
   (`$XDG_CACHE_HOME` or `~/.cache`, `~/Library/Caches`, `%LOCALAPPDATA%`) under `tsgo-watch/`, so
-  nothing is written into the repository. No compiler process stays alive between checks.
+  nothing is written into the repository. No compiler process stays alive between checks. An
+  error without a location is shown on the tsconfig, except TS2589 ("Type instantiation is
+  excessively deep"): the compiler reports that one without a location while it computes the
+  declaration signature of a changed file that exports a very large inferred type (an Elysia
+  app), although the check of that file passes.
 - **Triggers.** Zed reports changes on disk through `workspace/didChangeWatchedFiles` (saves,
   `git checkout`, formatters, other tools). Events are debounced for 150 ms. A changed file
   re-checks the projects whose last file list contains it; a new, deleted or unknown file also
