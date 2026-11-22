@@ -23,7 +23,24 @@ tsgo-watch is not in the Zed extension registry. Install it as a dev extension:
      on Fedora, `base-devel` on Arch, the Xcode Command Line Tools on macOS.
 2. Clone this repository and run `zed: install dev extension` from the command palette, choosing
    the repository root (the directory with `extension.toml`, not `server`).
-3. Open a TypeScript file. The language server starts with it.
+3. If your settings set `language_servers` for TypeScript or TSX (the `tsgo` extension's README
+   suggests that), Zed starts only the servers that list allows. Add `"tsgo-watch"` or `"..."` to
+   it, for both languages; otherwise tsgo-watch is not started and nothing reports an error. A
+   project's `.zed/settings.json` overrides your user settings, so check both:
+   ```json
+   {
+     "languages": {
+       "TypeScript": {
+         "language_servers": ["typescript-ls", "tsgo-watch", "!vtsls", "!typescript-language-server", "..."]
+       },
+       "TSX": {
+         "language_servers": ["typescript-ls", "tsgo-watch", "!vtsls", "!typescript-language-server", "..."]
+       }
+     }
+   }
+   ```
+4. Open a TypeScript file. The language server starts with it: the language server menu in Zed's
+   status bar lists `tsgo-watch`, and a `tsgo-watch-lsp` process runs.
 
 ### The helper binary
 
