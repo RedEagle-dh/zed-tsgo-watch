@@ -131,6 +131,11 @@ as a fallback. Without any compiler the server says so once and stays idle.
   ignored. A file that a program contains counts even when it is gitignored, and so does every
   `.ts`, `.tsx`, `.mts` and `.cts` file, so that a new generated source (a gitignored
   `src/api.gen.ts`) is checked when it appears. Unsaved edits are not checked.
+- **Changes during a check.** A change to a project whose check is running stops that compiler,
+  and a new check starts when it is gone, so saving several times in a row never runs two
+  compilers for one project. The stopped check publishes nothing. After five checks of a project
+  were stopped in a row, the next one runs to the end, so that files that keep changing still get
+  a result.
 - **Ownership.** When configs overlap (a root config that is also the base of package configs),
   each file is reported by one project: the deepest config directory above the file whose program
   contains it. Files that no such project contains get the de-duplicated union. A dirty project

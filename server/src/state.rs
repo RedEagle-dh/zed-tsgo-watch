@@ -10,6 +10,10 @@ use lsp_types::Diagnostic;
 
 pub type FileKey = Arc<Path>;
 
+/// How many checks of a project a change may stop in a row. The next one runs to the end, so
+/// that files that keep changing cannot hold a result back forever.
+const MAX_RESTARTS: u8 = 5;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
     Created,
@@ -40,6 +44,8 @@ pub struct Project {
     /// Was dirty while not runnable, so its last result is out of date and not published until
     /// a successful check replaces it.
     pub stale: bool,
+    /// Checks that a change stopped since the last one that ran to the end.
+    restarts: u8,
 }
 
 impl Project {
@@ -56,8 +62,19 @@ impl Project {
             dirty: true,
             forced: true,
             stale: false,
+            restarts: 0,
         }
     }
+}
+
+/// A compiler that has not ended yet.
+#[derive(Debug)]
+struct Run {
+    /// The project was forced when the compiler started.
+    forced: bool,
+    /// The project changed after the compiler started, so what it reports is out of date. The
+    /// compiler is stopped and its result dropped.
+    superseded: bool,
 }
 
 #[derive(Debug)]
@@ -65,7 +82,7 @@ pub struct State {
     root: PathBuf,
     pub projects: Vec<Project>,
     /// Configs with a compiler running, also those whose project was removed meanwhile.
-    running: HashSet<PathBuf>,
+    running: HashMap<PathBuf, Run>,
     by_dir: HashMap<PathBuf, Vec<usize>>,
     owns_cache: Vec<Option<bool>>,
     interned: HashSet<FileKey>,
@@ -84,7 +101,7 @@ impl State {
         Self {
             root,
             projects: Vec::new(),
-            running: HashSet::new(),
+            running: HashMap::new(),
             by_dir: HashMap::new(),
             owns_cache: Vec::new(),
             interned: HashSet::new(),
@@ -225,7 +242,7 @@ impl State {
         let mut runnable = Vec::new();
         for index in 0..self.projects.len() {
             let project = &self.projects[index];
-            let wants = project.dirty && !self.running.contains(&project.config);
+            let wants = project.dirty && !self.running.contains_key(&project.config);
             let has_compiler = project.compiler.is_some();
             let urgent = project.forced || !project.has_run;
             let ok = wants && has_compiler && (urgent || self.owns_any(index));
@@ -244,11 +261,42 @@ impl State {
         runnable.truncate(concurrency.saturating_sub(self.running.len()));
         for &index in &runnable {
             let project = &mut self.projects[index];
-            self.running.insert(project.config.clone());
+            let run = Run {
+                forced: project.forced,
+                superseded: false,
+            };
+            self.running.insert(project.config.clone(), run);
             project.dirty = false;
             project.forced = false;
         }
         runnable
+    }
+
+    /// Marks the running checks that a change has overtaken and returns their configs, each one
+    /// once. The caller stops their compilers; `finish` then drops what they report and the
+    /// projects are checked again. After `MAX_RESTARTS` stops in a row a check is left running.
+    pub fn supersede(&mut self) -> Vec<PathBuf> {
+        let mut overtaken = Vec::new();
+        for (config, run) in &mut self.running {
+            if run.superseded {
+                continue;
+            }
+            match self.projects.iter_mut().find(|p| p.config == *config) {
+                Some(project) if !project.dirty || project.restarts >= MAX_RESTARTS => continue,
+                Some(project) => project.restarts += 1,
+                // The project is gone, nothing uses the result.
+                None => {}
+            }
+            run.superseded = true;
+            overtaken.push(config.clone());
+        }
+        overtaken.sort();
+        overtaken
+    }
+
+    /// Whether the running check of `config` was overtaken by a change.
+    pub fn is_superseded(&self, config: &Path) -> bool {
+        self.running.get(config).is_some_and(|run| run.superseded)
     }
 
     pub fn running(&self) -> usize {
@@ -256,12 +304,23 @@ impl State {
     }
 
     /// Records the end of a check. `None` (crash) keeps the previous result, hidden if stale.
-    /// The result of a project that no longer exists is dropped.
+    /// The result of a project that no longer exists is dropped, and so is the result of a
+    /// superseded check, whose project stays dirty.
     pub fn finish(&mut self, config: &Path, result: Option<CheckResult>) {
-        self.running.remove(config);
+        let run = self.running.remove(config);
         let Some(index) = self.index_of(config) else {
             return;
         };
+        let project = &mut self.projects[index];
+        if let Some(run) = run
+            && run.superseded
+        {
+            project.dirty = true;
+            // The forced check did not happen, so the next one has to make up for it.
+            project.forced |= run.forced;
+            return;
+        }
+        project.restarts = 0;
         let Some(result) = result else { return };
         let fileset: HashSet<FileKey> = result.files.into_iter().map(|f| self.intern(f)).collect();
         let mut diagnostics: HashMap<FileKey, Vec<Diagnostic>> = HashMap::new();
@@ -748,19 +807,87 @@ mod tests {
     }
 
     #[test]
-    fn never_runs_a_project_twice_and_reruns_when_dirtied_while_running() {
+    fn a_change_supersedes_the_running_check_which_then_starts_again() {
+        let web = p("/w/apps/web/tsconfig.json");
         let mut state = workspace();
         run_all(&mut state);
+        state.take_changes();
+        state.file_changed(Path::new("/w/apps/web/main.ts"), Change::Changed);
+        assert_eq!(start(&mut state, 1), vec!["/w/apps/web/tsconfig.json"]);
+        assert!(state.supersede().is_empty(), "nothing changed since");
+        // A change in another project leaves the check alone.
         state.file_changed(Path::new("/w/scripts/tool.ts"), Change::Changed);
-        assert_eq!(start(&mut state, 10), vec!["/w/tsconfig.json"]);
-        state.file_changed(Path::new("/w/scripts/tool.ts"), Change::Changed);
-        assert!(state.schedule(10).is_empty(), "already running");
-        state.finish(&p("/w/tsconfig.json"), result(&["/w/scripts/tool.ts"], &[]));
+        assert!(state.supersede().is_empty());
+        assert!(!state.is_superseded(&web));
+
+        state.file_changed(Path::new("/w/apps/web/main.ts"), Change::Changed);
+        assert_eq!(state.supersede(), vec![web.clone()]);
+        assert!(state.is_superseded(&web));
+        assert!(state.supersede().is_empty(), "reported once");
+        assert!(
+            state.schedule(1).is_empty(),
+            "no second compiler while the first is not gone"
+        );
+        // Whatever the stopped compiler still reports is dropped.
+        state.finish(&web, result(&["/w/apps/web/main.ts"], &[]));
+        assert!(state.take_changes().is_empty());
+        assert_eq!(start(&mut state, 1), vec!["/w/apps/web/tsconfig.json"]);
+        assert!(!state.is_superseded(&web));
+        state.finish(&web, result(&["/w/apps/web/main.ts"], &[]));
+        assert_eq!(
+            summary(&state.take_changes()),
+            vec![("/w/apps/web/main.ts".into(), vec![])]
+        );
+    }
+
+    #[test]
+    fn a_superseded_forced_check_is_forced_again() {
+        // The root shadows the package and owns nothing, so only a forced check runs it.
+        let root = p("/w/tsconfig.json");
+        let ui = p("/w/packages/ui/tsconfig.json");
+        let mut state = State::new(p("/w"), true);
+        state.set_projects(vec![(root.clone(), tsc()), (ui.clone(), tsc())]);
+        state.schedule(10);
+        state.finish(&root, result(&["/w/packages/ui/a.ts"], &[]));
+        state.finish(&ui, result(&["/w/packages/ui/a.ts"], &[]));
+
+        state.file_changed(Path::new("/w/packages/ui/new.ts"), Change::Created);
         assert_eq!(
             start(&mut state, 10),
-            vec!["/w/tsconfig.json"],
-            "dirty again"
+            vec!["/w/packages/ui/tsconfig.json", "/w/tsconfig.json"]
         );
+        state.finish(&ui, result(&["/w/packages/ui/a.ts"], &[]));
+        // A plain change, which alone would not run the root.
+        state.file_changed(Path::new("/w/packages/ui/a.ts"), Change::Changed);
+        assert_eq!(state.supersede(), vec![root.clone()]);
+        assert_eq!(start(&mut state, 10), vec!["/w/packages/ui/tsconfig.json"]);
+        state.finish(&root, None);
+        assert_eq!(start(&mut state, 10), vec!["/w/tsconfig.json"]);
+    }
+
+    #[test]
+    fn after_five_stops_in_a_row_a_check_runs_to_the_end() {
+        let config = p("/w/tsconfig.json");
+        let mut state = State::new(p("/w"), true);
+        state.set_projects(vec![(config.clone(), tsc())]);
+        for _ in 0..5 {
+            assert_eq!(start(&mut state, 1), vec!["/w/tsconfig.json"]);
+            state.file_changed(Path::new("/w/a.ts"), Change::Changed);
+            assert_eq!(state.supersede(), vec![config.clone()]);
+            state.finish(&config, None);
+        }
+        assert_eq!(start(&mut state, 1), vec!["/w/tsconfig.json"]);
+        state.file_changed(Path::new("/w/a.ts"), Change::Changed);
+        assert!(state.supersede().is_empty(), "the sixth is not stopped");
+        state.finish(&config, result(&["/w/a.ts"], &[("/w/a.ts", 0, "e")]));
+        assert_eq!(
+            summary(&state.take_changes()),
+            vec![("/w/a.ts".into(), vec!["e".into()])]
+        );
+        // The change that arrived meanwhile is checked next, and that check can be stopped.
+        assert_eq!(start(&mut state, 1), vec!["/w/tsconfig.json"]);
+        state.file_changed(Path::new("/w/a.ts"), Change::Changed);
+        assert_eq!(state.supersede(), vec![config]);
     }
 
     #[test]
@@ -770,27 +897,33 @@ mod tests {
         let web = (p("/w/apps/web/tsconfig.json"), tsc());
         let mut state = workspace();
         assert_eq!(start(&mut state, 1), vec!["/w/apps/web/tsconfig.json"]);
-        // web's config disappears while its compiler runs: the job still takes the slot.
+        // web's config disappears while its compiler runs: the job is stopped, and takes the
+        // slot until it is gone.
         state.set_projects(vec![root.clone(), ui.clone()]);
+        assert_eq!(state.supersede(), vec![web.0.clone()]);
         assert_eq!(state.running(), 1);
         assert!(
             state.schedule(1).is_empty(),
             "concurrency counts the old job"
         );
         // It comes back before the old job ends: no second job for it.
-        state.set_projects(vec![root, ui, web]);
+        state.set_projects(vec![root.clone(), ui.clone(), web.clone()]);
+        assert!(state.supersede().is_empty(), "already stopped");
         assert_eq!(
             start(&mut state, 10),
             vec!["/w/packages/ui/tsconfig.json", "/w/tsconfig.json"]
         );
         assert_eq!(state.running(), 3);
-        state.finish(&p("/w/apps/web/tsconfig.json"), result(&[], &[]));
+        state.finish(&web.0, result(&[], &[]));
         assert_eq!(state.running(), 2);
         assert_eq!(
             start(&mut state, 10),
             vec!["/w/apps/web/tsconfig.json"],
             "the re-added project runs after the old job"
         );
+        // Rediscovery checks every project again, so it overtakes all running checks.
+        state.set_projects(vec![root.clone(), ui.clone(), web.clone()]);
+        assert_eq!(state.supersede(), vec![web.0, ui.0, root.0]);
     }
 
     #[test]

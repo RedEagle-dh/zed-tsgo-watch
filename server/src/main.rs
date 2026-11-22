@@ -268,6 +268,13 @@ impl<'a> Server<'a> {
         }
     }
 
+    /// A stopped check does not count: its project is checked again.
+    fn progress_stopped(&mut self) {
+        if let Some(progress) = &mut self.progress {
+            progress.started = progress.started.saturating_sub(1);
+        }
+    }
+
     fn progress_end(&mut self) {
         if let Some(progress) = self.progress.take() {
             self.notify(
@@ -291,9 +298,26 @@ impl<'a> Server<'a> {
         }
     }
 
+    /// Stops the compilers of the checks that a change has overtaken. Their projects are
+    /// checked again when the compilers are gone.
+    fn stop_superseded(&mut self) {
+        for config in self.state.supersede() {
+            self.runner.stop(&config);
+        }
+    }
+
     fn on_done(&mut self, done: Done) {
         let name = self.relative(&done.config);
         let seconds = done.duration.as_secs_f64();
+        if self.state.is_superseded(&done.config) {
+            log(&format!(
+                "{name}: stopped after {seconds:.2}s, files changed"
+            ));
+            self.state.finish(&done.config, None);
+            self.progress_stopped();
+            self.run();
+            return;
+        }
         match done.outcome {
             Ok(summary) => {
                 log(&format!(
@@ -375,6 +399,7 @@ impl<'a> Server<'a> {
         if rediscover {
             self.rediscover();
         }
+        self.stop_superseded();
         self.run();
     }
 

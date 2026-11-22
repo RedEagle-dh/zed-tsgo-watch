@@ -883,6 +883,60 @@ fn one_compiler_runs_at_a_time() {
     client.shutdown();
 }
 
+#[cfg(unix)]
+#[test]
+fn a_change_stops_the_running_compiler_and_starts_one_new_check() {
+    let workspace = Workspace::new("single");
+    let (fake, mut client) = FakeCompiler::start(&workspace, "restart");
+    fake.wait_for(&["start"]);
+    // A save while the check runs. No `overlap` in between: the first compiler was gone when
+    // the second started.
+    client.change("src/clean.ts", CHANGED);
+    fake.wait_for(&["start", "start"]);
+    client.change("src/clean.ts", CHANGED);
+    fake.wait_for(&["start", "start", "start"]);
+    client.settle(Duration::from_millis(400));
+    assert_eq!(fake.events(), ["start", "start", "start"]);
+
+    fake.open_gate();
+    client.wait_checks();
+    assert_eq!(fake.events(), ["start", "start", "start", "end"]);
+    assert_eq!(client.messages_for("tsconfig.json"), vec!["run 3"]);
+    assert_eq!(
+        client.publishes[&uri(&workspace.path("tsconfig.json"))],
+        1,
+        "the stopped checks published nothing"
+    );
+    client.shutdown();
+}
+
+#[cfg(unix)]
+#[test]
+fn after_five_stops_in_a_row_a_check_runs_to_its_end() {
+    let workspace = Workspace::new("single");
+    let (fake, mut client) = FakeCompiler::start(&workspace, "restart-limit");
+    let mut expected = vec!["start"];
+    fake.wait_for(&expected);
+    for _ in 0..5 {
+        client.change("src/clean.ts", CHANGED);
+        expected.push("start");
+        fake.wait_for(&expected);
+    }
+    // The sixth check is not stopped, so that files that keep changing still get a result.
+    client.change("src/clean.ts", CHANGED);
+    client.settle(Duration::from_millis(500));
+    assert_eq!(fake.events(), expected);
+
+    fake.open_gate();
+    // It ends, and the change that arrived meanwhile is checked after it.
+    client.wait_until("the check of the last change", |c| {
+        c.messages_for("tsconfig.json") == ["run 7"]
+    });
+    expected.extend(["end", "start", "end"]);
+    assert_eq!(fake.events(), expected);
+    client.shutdown();
+}
+
 /// Relative path of the native compiler in a hoisted install of `typescript` >= 7.
 fn platform_tsc() -> String {
     let os = match std::env::consts::OS {
