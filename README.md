@@ -25,7 +25,11 @@ tsgo-watch is not in the Zed extension registry. Install it as a dev extension:
 
 The extension looks for `tsgo-watch-lsp` in this order:
 
-1. `lsp.tsgo-watch.binary.path` in your Zed settings (with optional `arguments` and `env`).
+1. `lsp.tsgo-watch.binary.path` in your Zed settings (with optional `arguments` and `env`). Zed
+   then starts that binary itself without asking the extension, so the fallback compiler is not
+   installed automatically: for projects without their own TypeScript 7, add
+   `"arguments": ["--fallback-compiler", "/path/to/tsc"]` (the native `tsc` in
+   `@typescript/typescript-<os>-<arch>/lib`), or put the helper on your `PATH` instead.
 2. `tsgo-watch-lsp` on your `PATH`.
 3. The latest release of this repository on GitHub: the asset
    `tsgo-watch-lsp-<target>.gz` for your platform (`aarch64-apple-darwin`, `x86_64-apple-darwin`,
@@ -50,11 +54,11 @@ Then put `server/target/release` on the `PATH` that Zed sees, or point the setti
 For every tsconfig the server uses the nearest TypeScript 7 above it: `typescript` >= 7 (the
 native binary in `@typescript/typescript-<os>-<arch>`), otherwise `@typescript/native-preview`.
 Hoisted installs and bun's isolated installs (`node_modules/.bun/…`) both work; `node` is not
-needed. The extension asks the helper binary whether the worktree root has one
-(`tsgo-watch-lsp --has-compiler <root>`, which uses the `process:exec` extension capability). If
-it has neither, or the helper cannot be run, the extension installs the latest `typescript` into
-its own work directory (like the `tsgo` extension) and passes it to the server as a fallback.
-Without any compiler the server says so once and stays idle.
+needed. Unless `binary.path` is set, the extension asks the helper binary whether the worktree
+root has one (`tsgo-watch-lsp --has-compiler <root>`, which uses the `process:exec` extension
+capability). If it has neither, or the helper cannot be run, the extension installs the latest
+`typescript` into its own work directory (like the `tsgo` extension) and passes it to the server
+as a fallback. Without any compiler the server says so once and stays idle.
 
 ## Settings
 
