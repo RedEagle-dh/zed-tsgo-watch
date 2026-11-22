@@ -1,7 +1,10 @@
 //! Finds the tsconfig files of a workspace.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+
+use ignore::Match;
+use ignore::gitignore::Gitignore;
 
 use crate::paths::{normalize, realpath};
 
@@ -29,6 +32,50 @@ pub fn discover(root: &Path) -> Vec<PathBuf> {
         queue.extend(references(&config));
     }
     found.into_iter().collect()
+}
+
+/// Tells whether a path is ignored by the `.gitignore` files between the workspace root and the
+/// path, as the discovery walk sees it: the deepest matching rule decides, and nothing below an
+/// ignored directory counts. Each directory's `.gitignore` is read once, until `clear`.
+#[derive(Default)]
+pub struct GitIgnores {
+    dirs: HashMap<PathBuf, Option<Gitignore>>,
+}
+
+impl GitIgnores {
+    pub fn clear(&mut self) {
+        self.dirs.clear();
+    }
+
+    pub fn is_ignored(&mut self, root: &Path, path: &Path) -> bool {
+        // The directories from the root down to the parent of `path`.
+        let mut dirs: Vec<&Path> = path
+            .ancestors()
+            .skip(1)
+            .take_while(|dir| dir.starts_with(root))
+            .collect();
+        dirs.reverse();
+        for depth in 0..dirs.len() {
+            let dir = dirs[depth];
+            if !self.dirs.contains_key(dir) {
+                let (gitignore, _) = Gitignore::new(dir.join(".gitignore"));
+                let gitignore = (!gitignore.is_empty()).then_some(gitignore);
+                self.dirs.insert(dir.to_path_buf(), gitignore);
+            }
+            let (entry, is_dir) = match dirs.get(depth + 1) {
+                Some(child) => (*child, true),
+                None => (path, false),
+            };
+            for dir in dirs[..=depth].iter().rev() {
+                match self.dirs[*dir].as_ref().map(|g| g.matched(entry, is_dir)) {
+                    Some(Match::Ignore(_)) => return true,
+                    Some(Match::Whitelist(_)) => break,
+                    _ => {}
+                }
+            }
+        }
+        false
+    }
 }
 
 /// The configs that `config` references, resolved the way tsc does: a path ending in `.json` is
@@ -219,6 +266,40 @@ mod tests {
                 "tsconfig.node.json",
             ]
         );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn matches_paths_against_the_gitignore_files_above_them() {
+        let root = temp_dir("gitignore");
+        write(&root.join(".gitignore"), "dist/\n*.log\n/.next\n");
+        write(&root.join("packages/a/.gitignore"), "build/\n!keep.log\n");
+        write(&root.join("dist/.gitignore"), "!*\n");
+        let mut ignores = GitIgnores::default();
+        let mut ignored = |rel: &str| ignores.is_ignored(&root, &root.join(rel));
+        assert!(ignored("dist/index.js"));
+        assert!(
+            ignored("dist/sub/x.json"),
+            "a .gitignore below an ignored directory cannot re-include"
+        );
+        assert!(ignored(".next/types/app.ts"));
+        assert!(!ignored("packages/a/.next/x.ts"), "anchored to the root");
+        assert!(ignored("packages/a/build/out.json"));
+        assert!(
+            ignored("packages/a/dist/out.js"),
+            "applies to subdirectories"
+        );
+        assert!(ignored("debug.log"));
+        assert!(!ignored("packages/a/keep.log"), "the deeper rule wins");
+        assert!(!ignored("packages/a/src/index.ts"));
+        assert!(!ignored("lib/dist"), "dist/ matches directories only");
+        assert!(!ignores.is_ignored(&root, Path::new("/elsewhere/dist/x.js")));
+
+        // Read once until cleared.
+        write(&root.join(".gitignore"), "\n");
+        assert!(ignores.is_ignored(&root, &root.join("dist/index.js")));
+        ignores.clear();
+        assert!(!ignores.is_ignored(&root, &root.join("dist/index.js")));
         fs::remove_dir_all(&root).unwrap();
     }
 

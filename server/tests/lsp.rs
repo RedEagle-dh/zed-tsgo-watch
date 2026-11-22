@@ -901,3 +901,42 @@ fn other_json_files_outside_every_program_count_as_configs() {
     });
     client.shutdown();
 }
+
+#[test]
+fn gitignored_files_count_only_when_a_program_contains_them() {
+    if compiler().is_none() {
+        return;
+    }
+    let workspace = Workspace::new("single");
+    workspace.write(".gitignore", "dist/\nsrc/generated.ts\n");
+    workspace.write("src/generated.ts", "export const generated: number = 1;\n");
+    let mut client = Client::start(&workspace, Value::Null);
+    client.wait_checks();
+    assert_eq!(client.files_with_diagnostics(), vec!["src/broken.ts"]);
+
+    // Build output written by a bundler or dev server: no check, not even for JSON files.
+    let ends = client.progress_ends;
+    let output = [
+        "dist/index.js",
+        "dist/index.d.ts",
+        "dist/stats.json",
+        "dist/package.json",
+    ];
+    for rel in output {
+        workspace.write(rel, "{}\n");
+        client.change(rel, CREATED);
+    }
+    client.settle(Duration::from_millis(1000));
+    assert_eq!(client.progress_ends, ends, "no check for build output");
+
+    // A gitignored file that the program contains is checked.
+    workspace.write(
+        "src/generated.ts",
+        "export const generated: number = \"g\";\n",
+    );
+    client.change("src/generated.ts", CHANGED);
+    client.wait_until("error in the generated file", |c| {
+        !c.messages_for("src/generated.ts").is_empty()
+    });
+    client.shutdown();
+}

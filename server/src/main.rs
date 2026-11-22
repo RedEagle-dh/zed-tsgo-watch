@@ -21,6 +21,7 @@ use lsp_types::{
 };
 use serde_json::json;
 
+use crate::discover::GitIgnores;
 use crate::paths::{RootMap, in_node_modules, path_to_uri, real_file_path, uri_to_path};
 use crate::runner::{Done, Job, Runner};
 use crate::state::{Change, State};
@@ -93,6 +94,7 @@ struct Server<'a> {
     next_id: u64,
     events: Vec<(PathBuf, Change)>,
     deadline: Option<Instant>,
+    ignores: GitIgnores,
     refresh_supported: bool,
     refresh_deadline: Option<Instant>,
     warned_no_compiler: bool,
@@ -129,6 +131,7 @@ impl<'a> Server<'a> {
 
     fn rediscover(&mut self) {
         let started = Instant::now();
+        self.ignores.clear();
         let configs = discover::discover(&self.root.real);
         let mut missing = Vec::new();
         let projects: Vec<(PathBuf, Option<PathBuf>)> = configs
@@ -342,6 +345,11 @@ impl<'a> Server<'a> {
             if in_node_modules(&path) || !self.root.contains_real(&path) {
                 continue;
             }
+            // Build output and other gitignored files count only when a program contains them.
+            let in_fileset = self.state.in_fileset(&path);
+            if !in_fileset && self.ignores.is_ignored(&self.root.real, &path) {
+                continue;
+            }
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy())
@@ -355,7 +363,7 @@ impl<'a> Server<'a> {
             }
             // Another JSON file that no program contains can be a config as well: a base config
             // that projects extend, or a referenced config created after the start.
-            if name.ends_with(".json") && !self.state.in_fileset(&path) {
+            if name.ends_with(".json") && !in_fileset {
                 rediscover = true;
                 continue;
             }
@@ -611,6 +619,7 @@ fn main() {
         next_id: 0,
         events: Vec::new(),
         deadline: None,
+        ignores: GitIgnores::default(),
         refresh_supported,
         refresh_deadline: None,
         warned_no_compiler: false,
