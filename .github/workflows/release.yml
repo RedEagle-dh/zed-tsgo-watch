@@ -60,7 +60,17 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Create the release
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.gz --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        # A release created in the web UI (which also creates the tag) gets the binaries attached and
+        # keeps its title and notes; a bare tag push creates the release. Any other error fails.
+        run: |
+          if err=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json tagName 2>&1 >/dev/null); then
+            gh release upload "$GITHUB_REF_NAME" dist/*.gz --repo "$GITHUB_REPOSITORY" --clobber
+          elif [ "$err" = "release not found" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/*.gz --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+          else
+            echo "$err" >&2
+            exit 1
+          fi
