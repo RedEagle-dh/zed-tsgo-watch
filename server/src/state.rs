@@ -161,6 +161,11 @@ impl State {
         self.prune();
     }
 
+    /// Whether the last file list of any project contains `path`.
+    pub fn in_fileset(&self, path: &Path) -> bool {
+        self.projects.iter().any(|p| p.fileset.contains(path))
+    }
+
     pub fn index_of(&self, config: &Path) -> Option<usize> {
         self.projects.iter().position(|p| p.config == config)
     }

@@ -848,3 +848,56 @@ fn a_compiler_that_cannot_start_does_not_hold_up_other_projects() {
     );
     client.shutdown();
 }
+
+#[test]
+fn other_json_files_outside_every_program_count_as_configs() {
+    if compiler().is_none() {
+        return;
+    }
+    // web extends a shared base config outside its directory (Turborepo style); docs references
+    // a config with another name that does not exist yet.
+    let workspace = Workspace::new("ws");
+    workspace.write(
+        "packages/config/base.json",
+        r#"{ "extends": "../../tsconfig.json" }"#,
+    );
+    workspace.write(
+        "apps/web/tsconfig.json",
+        r#"{ "extends": "../../packages/config/base.json", "include": ["src"] }"#,
+    );
+    workspace.write(
+        "apps/docs/tsconfig.json",
+        r#"{ "files": [], "references": [{ "path": "./extra.json" }] }"#,
+    );
+    let unused = "export function f(): void {\n  const unused = 1;\n}\n";
+    workspace.write("apps/web/src/unused.ts", unused);
+    workspace.write("apps/docs/gen/x.ts", unused);
+    let mut client = Client::start(&workspace, Value::Null);
+    client.wait_checks();
+    assert!(client.messages_for("apps/web/src/unused.ts").is_empty());
+    assert!(client.messages_for("apps/docs/gen/x.ts").is_empty());
+
+    workspace.write(
+        "packages/config/base.json",
+        r#"{ "extends": "../../tsconfig.json", "compilerOptions": { "noUnusedLocals": true } }"#,
+    );
+    client.change("packages/config/base.json", CHANGED);
+    client.wait_until("error from the changed base config", |c| {
+        c.messages_for("apps/web/src/unused.ts")
+            .iter()
+            .any(|m| m.contains("'unused'"))
+    });
+
+    // Only the referenced config reports unused locals in docs.
+    workspace.write(
+        "apps/docs/extra.json",
+        r#"{ "extends": "../../tsconfig.json", "compilerOptions": { "noUnusedLocals": true }, "files": ["gen/x.ts"] }"#,
+    );
+    client.change("apps/docs/extra.json", CREATED);
+    client.wait_until("the created referenced config is checked", |c| {
+        c.messages_for("apps/docs/gen/x.ts")
+            .iter()
+            .any(|m| m.contains("'unused'"))
+    });
+    client.shutdown();
+}

@@ -353,6 +353,12 @@ impl<'a> Server<'a> {
                 rediscover = true;
                 continue;
             }
+            // Another JSON file that no program contains can be a config as well: a base config
+            // that projects extend, or a referenced config created after the start.
+            if name.ends_with(".json") && !self.state.in_fileset(&path) {
+                rediscover = true;
+                continue;
+            }
             self.state.file_changed(&path, change);
         }
         if rediscover {
