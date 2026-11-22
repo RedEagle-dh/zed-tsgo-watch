@@ -68,7 +68,12 @@ pub struct State {
     by_dir: HashMap<PathBuf, Vec<usize>>,
     owns_cache: Vec<Option<bool>>,
     interned: HashSet<FileKey>,
-    pub open: HashSet<PathBuf>,
+    /// Files the client has open (`didOpen` … `didClose`).
+    open: HashSet<PathBuf>,
+    /// Open files the client pulled diagnostics for, which Zed does for files in an editor but
+    /// not for files it opens only to show them in its diagnostics panel. Only these are
+    /// suppressed: the regular TypeScript server reports them, but not the panel-only ones.
+    in_editor: HashSet<PathBuf>,
     pub suppress_open: bool,
     published: HashMap<FileKey, Vec<Diagnostic>>,
 }
@@ -82,9 +87,34 @@ impl State {
             owns_cache: Vec::new(),
             interned: HashSet::new(),
             open: HashSet::new(),
+            in_editor: HashSet::new(),
             suppress_open,
             published: HashMap::new(),
         }
+    }
+
+    pub fn opened(&mut self, path: PathBuf) {
+        self.open.insert(path);
+    }
+
+    pub fn closed(&mut self, path: &Path) {
+        self.open.remove(path);
+        self.in_editor.remove(path);
+    }
+
+    /// Whether a file is open and was not pulled yet while this server shows diagnostics for it.
+    /// Zed opens such files for its diagnostics panel; a diagnostics refresh makes Zed pull them
+    /// from every server, so that the regular TypeScript server takes them over.
+    pub fn needs_refresh(&self) -> bool {
+        self.suppress_open
+            && self.open.iter().any(|path| {
+                !self.in_editor.contains(path) && self.published.contains_key(path.as_path())
+            })
+    }
+
+    /// Records a diagnostics pull for `path`. Returns true when this newly suppresses it.
+    pub fn pulled(&mut self, path: &Path) -> bool {
+        self.open.contains(path) && self.in_editor.insert(path.to_path_buf())
     }
 
     fn intern(&mut self, path: PathBuf) -> FileKey {
@@ -252,7 +282,7 @@ impl State {
         }
         let mut desired = HashMap::new();
         for file in files {
-            if self.suppress_open && self.open.contains(&**file) {
+            if self.suppress_open && self.in_editor.contains(&**file) {
                 continue;
             }
             let diagnostics = match self.owner(file) {
@@ -656,24 +686,58 @@ mod tests {
     }
 
     #[test]
-    fn open_files_are_suppressed_and_republished_on_close() {
+    fn files_in_an_editor_are_suppressed_and_republished_on_close() {
         let mut state = workspace();
         run_all(&mut state);
         state.take_changes();
-        state.open.insert(p("/w/apps/web/main.ts"));
+        let main = Path::new("/w/apps/web/main.ts");
+        // Opened (for example by the diagnostics panel) but not pulled: still reported.
+        state.opened(main.to_path_buf());
+        assert!(state.take_changes().is_empty());
+        assert!(!state.pulled(Path::new("/w/scripts/tool.ts")), "not open");
+        assert!(state.pulled(main));
+        assert!(!state.pulled(main), "already suppressed");
         assert_eq!(
             summary(&state.take_changes()),
             vec![("/w/apps/web/main.ts".into(), vec![])]
         );
-        state.open.remove(Path::new("/w/apps/web/main.ts"));
+        state.closed(main);
         assert_eq!(
             summary(&state.take_changes()),
             vec![("/w/apps/web/main.ts".into(), vec!["web".into()])]
         );
 
         state.suppress_open = false;
-        state.open.insert(p("/w/apps/web/main.ts"));
+        state.opened(main.to_path_buf());
+        state.pulled(main);
         assert!(state.take_changes().is_empty());
+    }
+
+    #[test]
+    fn open_files_with_diagnostics_that_were_not_pulled_need_a_refresh() {
+        let mut state = workspace();
+        run_all(&mut state);
+        state.take_changes();
+        let main = Path::new("/w/apps/web/main.ts");
+        let clean = Path::new("/w/apps/web/clean.ts");
+        state.opened(clean.to_path_buf());
+        assert!(
+            !state.needs_refresh(),
+            "nothing to hand over for a clean file"
+        );
+        state.opened(main.to_path_buf());
+        assert!(state.needs_refresh());
+        state.pulled(main);
+        state.take_changes();
+        assert!(!state.needs_refresh());
+        state.closed(main);
+        state.take_changes();
+        state.suppress_open = false;
+        state.opened(main.to_path_buf());
+        assert!(
+            !state.needs_refresh(),
+            "nothing is suppressed in report mode"
+        );
     }
 
     #[test]

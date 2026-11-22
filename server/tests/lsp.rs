@@ -148,10 +148,16 @@ struct Client {
     progress_ends: usize,
     show_messages: Vec<String>,
     registrations: Vec<Value>,
+    refresh_requests: usize,
 }
 
 impl Client {
     fn start(workspace: &Workspace, options: Value) -> Self {
+        Self::start_with(workspace, options, false)
+    }
+
+    /// `refresh` advertises support for `workspace/diagnostic/refresh`, as Zed does.
+    fn start_with(workspace: &Workspace, options: Value, refresh: bool) -> Self {
         let tsc = compiler().expect("compiler");
         let mut child = Command::new(env!("CARGO_BIN_EXE_tsgo-watch-lsp"))
             .arg("--fallback-compiler")
@@ -205,6 +211,7 @@ impl Client {
             progress_ends: 0,
             show_messages: Vec::new(),
             registrations: Vec::new(),
+            refresh_requests: 0,
         };
         let id = client.request(
             "initialize",
@@ -213,7 +220,10 @@ impl Client {
                 "rootUri": uri(&workspace.root),
                 "capabilities": {
                     "window": { "workDoneProgress": true },
-                    "workspace": { "didChangeWatchedFiles": { "dynamicRegistration": true } }
+                    "workspace": {
+                        "didChangeWatchedFiles": { "dynamicRegistration": true },
+                        "diagnostic": { "refreshSupport": refresh }
+                    }
                 },
                 "initializationOptions": options
             }),
@@ -222,6 +232,10 @@ impl Client {
         assert_eq!(
             response["result"]["capabilities"]["textDocumentSync"]["openClose"],
             true
+        );
+        assert_eq!(
+            response["result"]["capabilities"]["diagnosticProvider"]["identifier"],
+            "tsgo-watch"
         );
         client.notify("initialized", json!({}));
         client
@@ -256,6 +270,9 @@ impl Client {
             message.get("id"),
             message.get("method").and_then(Value::as_str),
         ) {
+            if method == "workspace/diagnostic/refresh" {
+                self.refresh_requests += 1;
+            }
             if method == "client/registerCapability" {
                 self.registrations.push(message["params"].clone());
             }
@@ -386,6 +403,17 @@ impl Client {
             "textDocument/didOpen",
             json!({ "textDocument": { "uri": uri(&path), "languageId": "typescript", "version": 1, "text": text } }),
         );
+    }
+
+    /// Pulls diagnostics for a file, as Zed does for files shown in an editor.
+    fn show(&mut self, rel: &str) {
+        let path = self.root.join(rel);
+        let id = self.request(
+            "textDocument/diagnostic",
+            json!({ "textDocument": { "uri": uri(&path) } }),
+        );
+        let response = self.wait_response(id);
+        assert_eq!(response["result"], json!({ "kind": "full", "items": [] }));
     }
 
     fn close(&mut self, rel: &str) {
@@ -602,19 +630,23 @@ fn package_change_breaks_dependent_package() {
 }
 
 #[test]
-fn open_files_are_suppressed_and_republished_on_close() {
+fn files_in_an_editor_are_suppressed_and_republished_on_close() {
     if compiler().is_none() {
         return;
     }
     let workspace = Workspace::new("ws");
-    let mut client = Client::start(&workspace, Value::Null);
+    let mut client = Client::start_with(&workspace, Value::Null, true);
     client.wait_checks();
     assert_eq!(client.messages_for("apps/web/src/main.ts").len(), 3);
 
     client.open("apps/web/src/main.ts");
+    client.show("apps/web/src/main.ts");
     client.wait_until("suppression", |c| {
         c.messages_for("apps/web/src/main.ts").is_empty()
     });
+    // Pulled right away, as for a file opened in an editor: no refresh needed.
+    client.settle(Duration::from_millis(600));
+    assert_eq!(client.refresh_requests, 0);
 
     // A change while the file is open publishes nothing for it.
     workspace.write(
@@ -646,6 +678,54 @@ fn open_files_are_suppressed_and_republished_on_close() {
 }
 
 #[test]
+fn files_opened_without_a_pull_stay_reported() {
+    if compiler().is_none() {
+        return;
+    }
+    // Zed opens the files listed in its diagnostics panel without pulling diagnostics for them.
+    let workspace = Workspace::new("ws");
+    let mut client = Client::start(&workspace, Value::Null);
+    client.wait_checks();
+    let file = uri(&workspace.path("apps/web/src/main.ts"));
+    let publishes = client.publishes[&file];
+    client.open("apps/web/src/main.ts");
+    client.settle(Duration::from_millis(500));
+    assert_eq!(client.publishes[&file], publishes);
+    assert_eq!(client.messages_for("apps/web/src/main.ts").len(), 3);
+    // Pulls for files that are not open change nothing.
+    client.show("packages/ui/src/index.ts");
+    client.settle(Duration::from_millis(300));
+    assert_eq!(client.messages_for("packages/ui/src/index.ts").len(), 1);
+    client.shutdown();
+}
+
+#[test]
+fn files_opened_without_a_pull_trigger_one_refresh() {
+    if compiler().is_none() {
+        return;
+    }
+    // The refresh makes Zed pull the panel's files from every server; the regular TypeScript
+    // server then reports them and this server stops.
+    let workspace = Workspace::new("ws");
+    let mut client = Client::start_with(&workspace, Value::Null, true);
+    client.wait_checks();
+    client.open("apps/web/src/main.ts");
+    client.open("packages/ui/src/index.ts");
+    client.open("apps/web/src/clean.ts");
+    client.wait_until("refresh request", |c| c.refresh_requests == 1);
+    assert_eq!(client.messages_for("apps/web/src/main.ts").len(), 3);
+    client.show("apps/web/src/main.ts");
+    client.show("packages/ui/src/index.ts");
+    client.wait_until("suppression after the pull", |c| {
+        c.messages_for("apps/web/src/main.ts").is_empty()
+            && c.messages_for("packages/ui/src/index.ts").is_empty()
+    });
+    client.settle(Duration::from_millis(600));
+    assert_eq!(client.refresh_requests, 1, "one refresh for the burst");
+    client.shutdown();
+}
+
+#[test]
 fn open_files_can_be_reported() {
     if compiler().is_none() {
         return;
@@ -659,6 +739,7 @@ fn open_files_can_be_reported() {
     let file = uri(&workspace.path("apps/web/src/main.ts"));
     let publishes = client.publishes[&file];
     client.open("apps/web/src/main.ts");
+    client.show("apps/web/src/main.ts");
     client.settle(Duration::from_millis(500));
     assert_eq!(client.publishes[&file], publishes);
     assert_eq!(client.messages_for("apps/web/src/main.ts").len(), 3);

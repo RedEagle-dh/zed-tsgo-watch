@@ -16,8 +16,8 @@ use lsp_server::{Connection, Message, Notification, Request, RequestId, Response
 use lsp_types::notification::Notification as _;
 use lsp_types::{
     DidChangeWatchedFilesParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    FileChangeType, InitializeParams, MessageType, PublishDiagnosticsParams, ShowMessageParams,
-    Uri, notification, request::Request as _,
+    DocumentDiagnosticParams, FileChangeType, InitializeParams, MessageType,
+    PublishDiagnosticsParams, ShowMessageParams, Uri, notification, request, request::Request as _,
 };
 use serde_json::json;
 
@@ -26,6 +26,10 @@ use crate::runner::{Done, Job, Runner};
 use crate::state::{Change, State};
 
 const DEBOUNCE: Duration = Duration::from_millis(150);
+/// How long a file opened with diagnostics may stay unpulled before a refresh is requested. Zed
+/// pulls files opened in an editor within about 100 ms; files opened for its diagnostics panel
+/// are not pulled until something triggers a refresh.
+const PULL_GRACE: Duration = Duration::from_millis(250);
 const SOURCE_GLOB: &str = "**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs,json}";
 const LOCKFILE_GLOB: &str = "**/{bun.lock,bun.lockb,package-lock.json,yarn.lock,pnpm-lock.yaml}";
 const LOCKFILES: [&str; 5] = [
@@ -89,6 +93,8 @@ struct Server<'a> {
     next_id: u64,
     events: Vec<(PathBuf, Change)>,
     deadline: Option<Instant>,
+    refresh_supported: bool,
+    refresh_deadline: Option<Instant>,
     warned_no_compiler: bool,
     shutting_down: bool,
 }
@@ -118,7 +124,7 @@ impl<'a> Server<'a> {
                 }
             }]
         });
-        self.request(lsp_types::request::RegisterCapability::METHOD, registration);
+        self.request(request::RegisterCapability::METHOD, registration);
     }
 
     fn rediscover(&mut self) {
@@ -352,10 +358,25 @@ impl<'a> Server<'a> {
     fn handle(&mut self, message: Message) -> bool {
         match message {
             Message::Request(request) => {
-                if request.method == lsp_types::request::Shutdown::METHOD {
+                if request.method == request::Shutdown::METHOD {
                     self.shutting_down = true;
                     self.runner.kill_all();
                     self.send(Response::new_ok(request.id, ()).into());
+                } else if request.method == request::DocumentDiagnosticRequest::METHOD {
+                    // Zed pulls diagnostics for files shown in an editor. This server pushes
+                    // everything, so the answer is empty; the pull only marks the file as
+                    // shown, which is what open-file suppression keys on.
+                    let path = serde_json::from_value::<DocumentDiagnosticParams>(request.params)
+                        .ok()
+                        .and_then(|params| self.client_path(&params.text_document.uri));
+                    self.send(
+                        Response::new_ok(request.id, json!({ "kind": "full", "items": [] })).into(),
+                    );
+                    if let Some(path) = path
+                        && self.state.pulled(&path)
+                    {
+                        self.publish();
+                    }
                 } else {
                     self.send(
                         Response::new_err(
@@ -382,8 +403,11 @@ impl<'a> Server<'a> {
                         serde_json::from_value::<DidOpenTextDocumentParams>(notification.params)
                         && let Some(path) = self.client_path(&params.text_document.uri)
                     {
-                        self.state.open.insert(path);
-                        self.publish();
+                        self.state.opened(path);
+                        if self.refresh_supported && self.state.needs_refresh() {
+                            self.refresh_deadline
+                                .get_or_insert_with(|| Instant::now() + PULL_GRACE);
+                        }
                     }
                 }
                 notification::DidCloseTextDocument::METHOD => {
@@ -391,7 +415,7 @@ impl<'a> Server<'a> {
                         serde_json::from_value::<DidCloseTextDocumentParams>(notification.params)
                         && let Some(path) = self.client_path(&params.text_document.uri)
                     {
-                        self.state.open.remove(&path);
+                        self.state.closed(&path);
                         self.publish();
                     }
                 }
@@ -408,9 +432,23 @@ impl<'a> Server<'a> {
         true
     }
 
+    fn refresh_if_needed(&mut self) {
+        self.refresh_deadline = None;
+        if self.state.needs_refresh() {
+            self.request(
+                request::WorkspaceDiagnosticRefresh::METHOD,
+                serde_json::Value::Null,
+            );
+        }
+    }
+
     fn main_loop(&mut self, done: &Receiver<Done>) {
         loop {
-            let timeout = match self.deadline {
+            let next = match (self.deadline, self.refresh_deadline) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            let timeout = match next {
                 Some(deadline) => crossbeam_channel::at(deadline),
                 None => crossbeam_channel::never(),
             };
@@ -422,7 +460,15 @@ impl<'a> Server<'a> {
                 recv(done) -> finished => if let Ok(finished) = finished && !self.shutting_down {
                     self.on_done(finished);
                 },
-                recv(timeout) -> _ => self.flush_events(),
+                recv(timeout) -> _ => {
+                    let now = Instant::now();
+                    if self.refresh_deadline.is_some_and(|d| d <= now) {
+                        self.refresh_if_needed();
+                    }
+                    if self.deadline.is_some_and(|d| d <= now) {
+                        self.flush_events();
+                    }
+                }
             }
         }
         self.runner.kill_all();
@@ -490,6 +536,13 @@ fn main() {
         }
     };
     let options = Options::from_json(params.initialization_options.as_ref());
+    let refresh_supported = params
+        .capabilities
+        .workspace
+        .as_ref()
+        .and_then(|w| w.diagnostic.as_ref())
+        .and_then(|d| d.refresh_support)
+        .unwrap_or(false);
     let progress_supported = params
         .capabilities
         .window
@@ -497,7 +550,10 @@ fn main() {
         .and_then(|w| w.work_done_progress)
         .unwrap_or(false);
     let result = json!({
-        "capabilities": { "textDocumentSync": { "openClose": true, "change": 0 } },
+        "capabilities": {
+            "textDocumentSync": { "openClose": true, "change": 0 },
+            "diagnosticProvider": { "identifier": "tsgo-watch", "interFileDependencies": true, "workspaceDiagnostics": false }
+        },
         "serverInfo": { "name": "tsgo-watch", "version": env!("CARGO_PKG_VERSION") }
     });
     if connection.initialize_finish(id, result).is_err() {
@@ -544,6 +600,8 @@ fn main() {
         next_id: 0,
         events: Vec::new(),
         deadline: None,
+        refresh_supported,
+        refresh_deadline: None,
         warned_no_compiler: false,
         shutting_down: false,
     };
