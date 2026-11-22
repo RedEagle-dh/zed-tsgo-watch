@@ -139,6 +139,14 @@ Zed runs, which is why tsgo-watch runs one-shot checks instead.
 - With `"suppress"`, files open in an editor and files shown in the diagnostics panel rely on your
   regular TypeScript server. With vtsls (which pushes diagnostics) the error count can jump for
   about a second while files change hands; with the `tsgo` extension it does not.
+- On Linux, in a workspace whose packages are linked into `node_modules` (bun workspaces, for
+  example), Zed reports a change to a package file on disk under its link path while the `tsgo`
+  extension's server runs, and does not reload its buffer. If that file is open in an editor or
+  listed in the diagnostics panel, the regular TypeScript server keeps reporting the errors of its
+  old content after the file was fixed outside Zed (for example by `git checkout` or a formatter).
+  tsgo-watch's own results are not affected. Editing or reopening the file clears them, and so
+  does closing the diagnostics panel tab and opening it again. Seen with Zed 1.29.3; not checked
+  on macOS or Windows.
 - JavaScript files with `checkJs` are reported, but the server is registered for TypeScript and
   TSX only, so an open JavaScript file is not suppressed.
 - Old build info files stay in the cache directory after a project is gone.
