@@ -38,7 +38,8 @@ pub struct Summary {
 #[derive(Default)]
 struct Children {
     next: u64,
-    map: HashMap<u64, Child>,
+    /// Running compilers with the config they check.
+    map: HashMap<u64, (PathBuf, Child)>,
 }
 
 #[derive(Clone)]
@@ -94,7 +95,7 @@ impl Runner {
             let mut children = self.children.lock().unwrap_or_else(|e| e.into_inner());
             children.next += 1;
             let id = children.next;
-            children.map.insert(id, child);
+            children.map.insert(id, (job.config.clone(), child));
             id
         };
         let runner = self.clone();
@@ -129,7 +130,7 @@ impl Runner {
         Ok(())
     }
 
-    /// Waits for a child after its output ended. `None` if it was killed by `kill_all`.
+    /// Waits for a child after its output ended. `None` if it was killed by `stop` or `kill_all`.
     fn reap(&self, id: u64) -> Option<ExitStatus> {
         let child = self
             .children
@@ -137,7 +138,25 @@ impl Runner {
             .unwrap_or_else(|e| e.into_inner())
             .map
             .remove(&id);
-        child.and_then(|mut child| child.wait().ok())
+        child.and_then(|(_, mut child)| child.wait().ok())
+    }
+
+    /// Kills the compiler that checks `config`, if it still runs, and waits for it to exit, so
+    /// that its memory is free before the next one starts. Its `Done` still arrives.
+    pub fn stop(&self, config: &Path) {
+        let child = {
+            let mut children = self.children.lock().unwrap_or_else(|e| e.into_inner());
+            let id = children
+                .map
+                .iter()
+                .find(|(_, (checked, _))| checked == config)
+                .map(|(id, _)| *id);
+            id.and_then(|id| children.map.remove(&id))
+        };
+        if let Some((_, mut child)) = child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 
     /// Kills every running compiler and waits for it to exit.
@@ -148,7 +167,7 @@ impl Runner {
             .unwrap_or_else(|e| e.into_inner())
             .map
             .drain()
-            .map(|(_, c)| c)
+            .map(|(_, (_, c))| c)
             .collect();
         for mut child in children {
             let _ = child.kill();

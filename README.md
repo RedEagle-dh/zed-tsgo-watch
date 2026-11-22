@@ -91,7 +91,7 @@ as a fallback. Without any compiler the server says so once and stays idle.
       "binary": { "path": "…", "arguments": [], "env": {} },
       "initialization_options": {
         "openFiles": "suppress",
-        "concurrency": 2
+        "concurrency": 1
       }
     }
   }
@@ -101,8 +101,9 @@ as a fallback. Without any compiler the server says so once and stays idle.
 - `openFiles`: `"suppress"` (default) leaves files that are open in an editor to your regular
   TypeScript server, so errors are not shown twice. `"report"` reports them too. Use `"report"`
   if you run no other TypeScript server.
-- `concurrency`: how many compiler processes may run at once. Default: a quarter of the CPU
-  cores, between 1 and 4.
+- `concurrency`: how many compiler processes may run at once in a workspace. Default: 1, because
+  each one holds a whole project in memory. A higher value checks several projects of a monorepo
+  at the same time and needs the memory of all of them at the same time (see [Measured](#measured)).
 
 ## How it works
 
@@ -115,7 +116,9 @@ as a fallback. Without any compiler the server says so once and stays idle.
 - **Checks.** `tsc -p <tsconfig> --noEmit --pretty false --incremental --tsBuildInfoFile <cache>
   --listFiles`, run in the tsconfig's directory. The build info goes to the user cache directory
   (`$XDG_CACHE_HOME` or `~/.cache`, `~/Library/Caches`, `%LOCALAPPDATA%`) under `tsgo-watch/`, so
-  nothing is written into the repository. No compiler process stays alive between checks. An
+  nothing is written into the repository. No compiler process stays alive between checks, and
+  unless `concurrency` is raised only one runs at a time: the projects of a monorepo are checked
+  one after the other. An
   error without a location is shown on the tsconfig, except TS2589 ("Type instantiation is
   excessively deep"): the compiler reports that one without a location while it computes the
   declaration signature of a changed file that exports a very large inferred type (an Elysia
@@ -128,6 +131,11 @@ as a fallback. Without any compiler the server says so once and stays idle.
   ignored. A file that a program contains counts even when it is gitignored, and so does every
   `.ts`, `.tsx`, `.mts` and `.cts` file, so that a new generated source (a gitignored
   `src/api.gen.ts`) is checked when it appears. Unsaved edits are not checked.
+- **Changes during a check.** A change to a project whose check is running stops that compiler,
+  and a new check starts when it is gone, so saving several times in a row never runs two
+  compilers for one project. The stopped check publishes nothing. After five checks of a project
+  were stopped in a row, the next one runs to the end, so that files that keep changing still get
+  a result.
 - **Ownership.** When configs overlap (a root config that is also the base of package configs),
   each file is reported by one project: the deepest config directory above the file whose program
   contains it. Files that no such project contains get the de-duplicated union. A dirty project
@@ -154,6 +162,10 @@ Synthetic project with 5000 files / 460k lines, TypeScript 7.0.2, one tsconfig, 
 
 `tsc --watch` re-checks faster (0.16 s) but keeps about 2 GB resident per project for as long as
 Zed runs, which is why tsgo-watch runs one-shot checks instead.
+
+A workspace of four projects with 4000 files each, all changed at once, on 12 cores: with one
+compiler at a time the compilers peak at 1.1 GB and the last result arrives after 6.5 s; with
+`concurrency: 3` they peak at 3.1 GB together and the last result arrives after 4.4 s.
 
 ## Limits
 
