@@ -37,7 +37,6 @@ pub struct Project {
     pub has_run: bool,
     pub dirty: bool,
     pub forced: bool,
-    pub running: bool,
     /// Was dirty while not runnable, so its last result is out of date and not published until
     /// a successful check replaces it.
     pub stale: bool,
@@ -56,7 +55,6 @@ impl Project {
             has_run: false,
             dirty: true,
             forced: true,
-            running: false,
             stale: false,
         }
     }
@@ -66,6 +64,8 @@ impl Project {
 pub struct State {
     root: PathBuf,
     pub projects: Vec<Project>,
+    /// Configs with a compiler running, also those whose project was removed meanwhile.
+    running: HashSet<PathBuf>,
     by_dir: HashMap<PathBuf, Vec<usize>>,
     owns_cache: Vec<Option<bool>>,
     interned: HashSet<FileKey>,
@@ -84,6 +84,7 @@ impl State {
         Self {
             root,
             projects: Vec::new(),
+            running: HashSet::new(),
             by_dir: HashMap::new(),
             owns_cache: Vec::new(),
             interned: HashSet::new(),
@@ -216,11 +217,10 @@ impl State {
     /// Picks the projects to start now, at most `concurrency` running at once, deepest first.
     /// The returned projects are marked running and clean.
     pub fn schedule(&mut self, concurrency: usize) -> Vec<usize> {
-        let running = self.projects.iter().filter(|p| p.running).count();
         let mut runnable = Vec::new();
         for index in 0..self.projects.len() {
             let project = &self.projects[index];
-            let wants = project.dirty && !project.running;
+            let wants = project.dirty && !self.running.contains(&project.config);
             let has_compiler = project.compiler.is_some();
             let urgent = project.forced || !project.has_run;
             let ok = wants && has_compiler && (urgent || self.owns_any(index));
@@ -236,10 +236,10 @@ impl State {
             let (a, b) = (&self.projects[a], &self.projects[b]);
             b.depth.cmp(&a.depth).then_with(|| a.config.cmp(&b.config))
         });
-        runnable.truncate(concurrency.saturating_sub(running));
+        runnable.truncate(concurrency.saturating_sub(self.running.len()));
         for &index in &runnable {
             let project = &mut self.projects[index];
-            project.running = true;
+            self.running.insert(project.config.clone());
             project.dirty = false;
             project.forced = false;
         }
@@ -247,15 +247,16 @@ impl State {
     }
 
     pub fn running(&self) -> usize {
-        self.projects.iter().filter(|p| p.running).count()
+        self.running.len()
     }
 
     /// Records the end of a check. `None` (crash) keeps the previous result, hidden if stale.
+    /// The result of a project that no longer exists is dropped.
     pub fn finish(&mut self, config: &Path, result: Option<CheckResult>) {
+        self.running.remove(config);
         let Some(index) = self.index_of(config) else {
             return;
         };
-        self.projects[index].running = false;
         let Some(result) = result else { return };
         let fileset: HashSet<FileKey> = result.files.into_iter().map(|f| self.intern(f)).collect();
         let mut diagnostics: HashMap<FileKey, Vec<Diagnostic>> = HashMap::new();
@@ -701,6 +702,36 @@ mod tests {
             start(&mut state, 10),
             vec!["/w/tsconfig.json"],
             "dirty again"
+        );
+    }
+
+    #[test]
+    fn a_job_outlives_rediscovery_and_its_config_never_runs_twice() {
+        let root = (p("/w/tsconfig.json"), tsc());
+        let ui = (p("/w/packages/ui/tsconfig.json"), tsc());
+        let web = (p("/w/apps/web/tsconfig.json"), tsc());
+        let mut state = workspace();
+        assert_eq!(start(&mut state, 1), vec!["/w/apps/web/tsconfig.json"]);
+        // web's config disappears while its compiler runs: the job still takes the slot.
+        state.set_projects(vec![root.clone(), ui.clone()]);
+        assert_eq!(state.running(), 1);
+        assert!(
+            state.schedule(1).is_empty(),
+            "concurrency counts the old job"
+        );
+        // It comes back before the old job ends: no second job for it.
+        state.set_projects(vec![root, ui, web]);
+        assert_eq!(
+            start(&mut state, 10),
+            vec!["/w/packages/ui/tsconfig.json", "/w/tsconfig.json"]
+        );
+        assert_eq!(state.running(), 3);
+        state.finish(&p("/w/apps/web/tsconfig.json"), result(&[], &[]));
+        assert_eq!(state.running(), 2);
+        assert_eq!(
+            start(&mut state, 10),
+            vec!["/w/apps/web/tsconfig.json"],
+            "the re-added project runs after the old job"
         );
     }
 
