@@ -50,9 +50,11 @@ Then put `server/target/release` on the `PATH` that Zed sees, or point the setti
 For every tsconfig the server uses the nearest TypeScript 7 above it: `typescript` >= 7 (the
 native binary in `@typescript/typescript-<os>-<arch>`), otherwise `@typescript/native-preview`.
 Hoisted installs and bun's isolated installs (`node_modules/.bun/…`) both work; `node` is not
-needed. If the worktree root has neither, the extension installs the latest `typescript` into its
-own work directory (like the `tsgo` extension) and passes it to the server as a fallback. Without
-any compiler the server says so once and stays idle.
+needed. The extension asks the helper binary whether the worktree root has one
+(`tsgo-watch-lsp --has-compiler <root>`, which uses the `process:exec` extension capability). If
+it has neither, or the helper cannot be run, the extension installs the latest `typescript` into
+its own work directory (like the `tsgo` extension) and passes it to the server as a fallback.
+Without any compiler the server says so once and stays idle.
 
 ## Settings
 

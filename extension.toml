@@ -9,3 +9,9 @@ repository = "https://github.com/RedEagle-dh/zed-tsgo-watch"
 [language_servers.tsgo-watch]
 name = "tsgo-watch"
 languages = ["TypeScript", "TSX"]
+
+# Asks the helper binary (at whatever path it was found) whether the worktree has a compiler.
+[[capabilities]]
+kind = "process:exec"
+command = "*"
+args = ["--has-compiler", "*"]

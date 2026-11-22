@@ -37,14 +37,6 @@ fn executable(name: &str, os: zed::Os) -> String {
     }
 }
 
-/// Major version from the text of a `package.json`.
-fn major_version(package_json: &str) -> Option<u64> {
-    let value: serde_json::Value = serde_json::from_str(package_json).ok()?;
-    let version = value.get("version")?.as_str()?;
-    let digits: String = version.chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse().ok()
-}
-
 /// Relative path of the native compiler inside an npm install of `typescript` >= 7.
 fn compiler_binary(os: zed::Os, arch: zed::Architecture) -> Option<String> {
     let os_name = match os {
@@ -214,17 +206,15 @@ fn missing_server(reason: &str) -> String {
     )
 }
 
-/// Whether the worktree root has TypeScript 7 or the native preview installed.
-fn worktree_has_compiler(worktree: &Worktree) -> bool {
-    let typescript = worktree
-        .read_text_file("node_modules/typescript/package.json")
-        .ok()
-        .and_then(|text| major_version(&text))
-        .is_some_and(|major| major >= 7);
-    typescript
-        || worktree
-            .read_text_file("node_modules/@typescript/native-preview/package.json")
-            .is_ok()
+/// Whether the helper binary finds a TypeScript 7 compiler for the worktree root, with the same
+/// lookup the server uses. A helper that cannot be run counts as no.
+fn worktree_has_compiler(server: &str, env: &[(String, String)], worktree: &Worktree) -> bool {
+    zed::process::Command::new(server)
+        .arg("--has-compiler")
+        .arg(worktree.root_path())
+        .envs(env.iter().cloned())
+        .output()
+        .is_ok_and(|output| output.status == Some(0))
 }
 
 impl zed::Extension for TsgoWatch {
@@ -243,7 +233,7 @@ impl zed::Extension for TsgoWatch {
         let binary = LspSettings::for_worktree(SERVER_ID, worktree)
             .ok()
             .and_then(|settings| settings.binary);
-        let env = binary
+        let env: Vec<(String, String)> = binary
             .as_ref()
             .and_then(|b| b.env.clone())
             .map(|env| env.into_iter().collect())
@@ -252,7 +242,7 @@ impl zed::Extension for TsgoWatch {
             Some(path) => (path, binary.and_then(|b| b.arguments).unwrap_or_default()),
             None => (self.server_command(id, worktree)?, Vec::new()),
         };
-        if !worktree_has_compiler(worktree)
+        if !worktree_has_compiler(&command, &env, worktree)
             && let Some(compiler) = self.fallback_compiler(id)
         {
             args.push("--fallback-compiler".to_string());
@@ -332,17 +322,5 @@ mod tests {
             Some("node_modules/@typescript/typescript-win32-arm64/lib/tsc.exe")
         );
         assert_eq!(compiler_binary(Os::Mac, A::X86), None);
-    }
-
-    #[test]
-    fn reads_typescript_major_version() {
-        assert_eq!(major_version(r#"{ "version": "7.0.2" }"#), Some(7));
-        assert_eq!(major_version(r#"{ "version": "5.9.3" }"#), Some(5));
-        assert_eq!(
-            major_version(r#"{ "version": "7.1.0-dev.20260101" }"#),
-            Some(7)
-        );
-        assert_eq!(major_version("{}"), None);
-        assert_eq!(major_version("not json"), None);
     }
 }
