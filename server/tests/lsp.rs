@@ -808,14 +808,8 @@ fn changes_reported_through_a_workspace_symlink_are_followed() {
     client.shutdown();
 }
 
-#[test]
-fn a_compiler_that_cannot_start_does_not_hold_up_other_projects() {
-    if compiler().is_none() {
-        return;
-    }
-    // apps/bad has its own TypeScript 7 whose binary cannot be executed. It is first in line, and
-    // with concurrency 1 the other projects must still be checked right away.
-    let workspace = Workspace::new("ws");
+/// Relative path of the native compiler in a hoisted install of `typescript` >= 7.
+fn platform_tsc() -> String {
     let os = match std::env::consts::OS {
         "macos" => "darwin",
         "windows" => "win32",
@@ -827,15 +821,68 @@ fn a_compiler_that_cannot_start_does_not_hold_up_other_projects() {
         other => other,
     };
     let exe = if cfg!(windows) { "tsc.exe" } else { "tsc" };
+    format!("node_modules/@typescript/typescript-{os}-{arch}/lib/{exe}")
+}
+
+fn run_has_compiler(args: &[&Path]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_tsgo-watch-lsp"))
+        .arg("--has-compiler")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run --has-compiler")
+}
+
+#[test]
+fn has_compiler_prints_the_compiler_for_a_directory() {
+    // Only the lookup runs, so no real compiler is needed.
+    let workspace = Workspace::new("ws");
+
+    // The fixture has no node_modules. The lookup continues above the workspace, so only assert
+    // that nothing below it is reported.
+    let output = run_has_compiler(&[&workspace.root]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    if output.status.code() == Some(0) {
+        assert!(!Path::new(stdout.trim_end()).starts_with(&workspace.root));
+    } else {
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(stdout, "");
+    }
+
+    workspace.write(
+        "node_modules/typescript/package.json",
+        r#"{ "name": "typescript", "version": "7.0.2" }"#,
+    );
+    workspace.write(&platform_tsc(), "");
+    let output = run_has_compiler(&[&workspace.root]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let printed = stdout.strip_suffix('\n').expect("one line");
+    assert!(!printed.contains('\n'));
+    assert_eq!(
+        std::fs::canonicalize(printed).unwrap(),
+        std::fs::canonicalize(workspace.path(&platform_tsc())).unwrap()
+    );
+
+    let output = run_has_compiler(&[]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn a_compiler_that_cannot_start_does_not_hold_up_other_projects() {
+    if compiler().is_none() {
+        return;
+    }
+    // apps/bad has its own TypeScript 7 whose binary cannot be executed. It is first in line, and
+    // with concurrency 1 the other projects must still be checked right away.
+    let workspace = Workspace::new("ws");
     workspace.write("apps/bad/tsconfig.json", r#"{ "include": ["src"] }"#);
     workspace.write(
         "apps/bad/node_modules/typescript/package.json",
         r#"{ "name": "typescript", "version": "7.0.2" }"#,
     );
-    workspace.write(
-        &format!("apps/bad/node_modules/@typescript/typescript-{os}-{arch}/lib/{exe}"),
-        "not a compiler\n",
-    );
+    workspace.write(&format!("apps/bad/{}", platform_tsc()), "not a compiler\n");
     let mut client = Client::start(&workspace, json!({ "concurrency": 1 }));
     client.wait_checks();
     assert_eq!(

@@ -509,6 +509,10 @@ fn parse_args() -> Result<Args, String> {
                 let value = args.next().ok_or("--fallback-compiler needs a path")?;
                 parsed.fallback = Some(PathBuf::from(value));
             }
+            "--has-compiler" => {
+                let dir = args.next().ok_or("--has-compiler needs a directory")?;
+                std::process::exit(has_compiler(PathBuf::from(dir)));
+            }
             "--stdio" => {}
             "--version" => {
                 println!("tsgo-watch-lsp {}", env!("CARGO_PKG_VERSION"));
@@ -518,6 +522,19 @@ fn parse_args() -> Result<Args, String> {
         }
     }
     Ok(parsed)
+}
+
+/// `--has-compiler <dir>`: prints the compiler the server would use for a project in `dir` and
+/// returns the exit code, 0 if there is one and 1 if not.
+fn has_compiler(dir: PathBuf) -> i32 {
+    // The same lookup as for a tsconfig in a workspace rooted at `dir`.
+    match compiler::find_compiler(&RootMap::new(dir).real) {
+        Some(path) => {
+            println!("{}", path.display());
+            0
+        }
+        None => 1,
+    }
 }
 
 #[allow(deprecated)]
