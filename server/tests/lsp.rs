@@ -131,7 +131,9 @@ impl Workspace {
     }
 
     fn write(&self, rel: &str, text: &str) {
-        std::fs::write(self.path(rel), text).unwrap();
+        let path = self.path(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
     }
 }
 
@@ -803,5 +805,46 @@ fn changes_reported_through_a_workspace_symlink_are_followed() {
     client.wait_until("error fixed through the link", |c| {
         c.messages_for("packages/ui/src/index.ts").is_empty()
     });
+    client.shutdown();
+}
+
+#[test]
+fn a_compiler_that_cannot_start_does_not_hold_up_other_projects() {
+    if compiler().is_none() {
+        return;
+    }
+    // apps/bad has its own TypeScript 7 whose binary cannot be executed. It is first in line, and
+    // with concurrency 1 the other projects must still be checked right away.
+    let workspace = Workspace::new("ws");
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    let exe = if cfg!(windows) { "tsc.exe" } else { "tsc" };
+    workspace.write("apps/bad/tsconfig.json", r#"{ "include": ["src"] }"#);
+    workspace.write(
+        "apps/bad/node_modules/typescript/package.json",
+        r#"{ "name": "typescript", "version": "7.0.2" }"#,
+    );
+    workspace.write(
+        &format!("apps/bad/node_modules/@typescript/typescript-{os}-{arch}/lib/{exe}"),
+        "not a compiler\n",
+    );
+    let mut client = Client::start(&workspace, json!({ "concurrency": 1 }));
+    client.wait_checks();
+    assert_eq!(
+        client.files_with_diagnostics(),
+        vec![
+            "apps/web/src/main.ts",
+            "packages/ui/src/index.ts",
+            "scripts/tool.ts"
+        ]
+    );
     client.shutdown();
 }

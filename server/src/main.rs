@@ -191,34 +191,41 @@ impl<'a> Server<'a> {
         if self.shutting_down {
             return;
         }
-        for index in self.state.schedule(self.concurrency) {
-            let project = &self.state.projects[index];
-            let config = project.config.clone();
-            let Some(compiler) = project.compiler.clone() else {
-                continue;
-            };
-            let name = compiler::build_info_name(&config);
-            let build_info = match &self.cache_dir {
-                Some(dir) => dir.join(name),
-                None => std::env::temp_dir().join("tsgo-watch").join(name),
-            };
-            if let Some(parent) = build_info.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let job = Job {
-                config: config.clone(),
-                compiler,
-                build_info,
-                root: self.root.real.clone(),
-            };
-            match self.runner.start(job) {
-                Ok(()) => self.progress_started(),
-                Err(error) => {
-                    log(&format!(
-                        "{}: cannot start compiler: {error}",
-                        self.relative(&config)
-                    ));
-                    self.state.finish(&config, None);
+        // A compiler that cannot be started frees its slot at once, so schedule again. The failed
+        // project is no longer dirty and is not picked again.
+        let mut failed = true;
+        while failed {
+            failed = false;
+            for index in self.state.schedule(self.concurrency) {
+                let project = &self.state.projects[index];
+                let config = project.config.clone();
+                let Some(compiler) = project.compiler.clone() else {
+                    continue;
+                };
+                let name = compiler::build_info_name(&config);
+                let build_info = match &self.cache_dir {
+                    Some(dir) => dir.join(name),
+                    None => std::env::temp_dir().join("tsgo-watch").join(name),
+                };
+                if let Some(parent) = build_info.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let job = Job {
+                    config: config.clone(),
+                    compiler,
+                    build_info,
+                    root: self.root.real.clone(),
+                };
+                match self.runner.start(job) {
+                    Ok(()) => self.progress_started(),
+                    Err(error) => {
+                        log(&format!(
+                            "{}: cannot start compiler: {error}",
+                            self.relative(&config)
+                        ));
+                        self.state.finish(&config, None);
+                        failed = true;
+                    }
                 }
             }
         }
