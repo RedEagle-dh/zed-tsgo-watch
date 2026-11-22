@@ -38,7 +38,8 @@ pub struct Project {
     pub dirty: bool,
     pub forced: bool,
     pub running: bool,
-    /// Dirty, not runnable, so its last result is out of date and not published.
+    /// Was dirty while not runnable, so its last result is out of date and not published until
+    /// a successful check replaces it.
     pub stale: bool,
 }
 
@@ -224,7 +225,9 @@ impl State {
             let urgent = project.forced || !project.has_run;
             let ok = wants && has_compiler && (urgent || self.owns_any(index));
             let project = &mut self.projects[index];
-            project.stale = wants && project.has_run && !ok;
+            if wants && project.has_run && !ok {
+                project.stale = true;
+            }
             if ok {
                 runnable.push(index);
             }
@@ -239,7 +242,6 @@ impl State {
             project.running = true;
             project.dirty = false;
             project.forced = false;
-            project.stale = false;
         }
         runnable
     }
@@ -248,7 +250,7 @@ impl State {
         self.projects.iter().filter(|p| p.running).count()
     }
 
-    /// Records the end of a check. `None` (crash) keeps the previous result.
+    /// Records the end of a check. `None` (crash) keeps the previous result, hidden if stale.
     pub fn finish(&mut self, config: &Path, result: Option<CheckResult>) {
         let Some(index) = self.index_of(config) else {
             return;
@@ -265,6 +267,7 @@ impl State {
         project.fileset = fileset;
         project.diagnostics = diagnostics;
         project.has_run = true;
+        project.stale = false;
         self.owns_cache = vec![None; self.projects.len()];
         self.prune();
     }
@@ -638,6 +641,51 @@ mod tests {
         state.finish(&p("/w/packages/ui/tsconfig.json"), result(&[], &[]));
         let started = state.schedule(10);
         assert_eq!(configs(&state, &started), vec!["/w/tsconfig.json"]);
+    }
+
+    #[test]
+    fn a_stale_result_stays_hidden_until_a_successful_check() {
+        let root = p("/w/tsconfig.json");
+        let ui = p("/w/packages/ui/tsconfig.json");
+        let mut state = State::new(p("/w"), true);
+        state.set_projects(vec![(root.clone(), tsc()), (ui.clone(), tsc())]);
+        state.schedule(10);
+        let root_result = || {
+            result(
+                &["/w/packages/ui/a.ts"],
+                &[("/w/tsconfig.json", 0, "root config")],
+            )
+        };
+        state.finish(&root, root_result());
+        state.finish(&ui, result(&["/w/packages/ui/a.ts"], &[]));
+        state.take_changes();
+
+        // The root owns nothing, so it stays dirty and its result is hidden.
+        state.file_changed(Path::new("/w/packages/ui/a.ts"), Change::Changed);
+        assert_eq!(start(&mut state, 1), vec!["/w/packages/ui/tsconfig.json"]);
+        assert_eq!(
+            summary(&state.take_changes()),
+            vec![("/w/tsconfig.json".into(), vec![])]
+        );
+
+        // A new file forces the root. Queued and then running, it stays hidden.
+        state.file_changed(Path::new("/w/new.ts"), Change::Created);
+        assert!(state.schedule(1).is_empty(), "ui still runs");
+        assert!(state.take_changes().is_empty(), "hidden while queued");
+        state.finish(&ui, result(&["/w/packages/ui/a.ts"], &[]));
+        assert_eq!(start(&mut state, 1), vec!["/w/tsconfig.json"]);
+        assert!(state.take_changes().is_empty(), "hidden while running");
+        state.finish(&root, None);
+        assert!(state.take_changes().is_empty(), "hidden after a crash");
+
+        // Only a successful check shows it again.
+        state.file_changed(Path::new("/w/new.ts"), Change::Changed);
+        assert_eq!(start(&mut state, 1), vec!["/w/tsconfig.json"]);
+        state.finish(&root, root_result());
+        assert_eq!(
+            summary(&state.take_changes()),
+            vec![("/w/tsconfig.json".into(), vec!["root config".into()])]
+        );
     }
 
     #[test]
