@@ -16,9 +16,13 @@ editing; tsgo-watch only adds the files it does not cover.
 
 tsgo-watch is not in the Zed extension registry. Install it as a dev extension:
 
-1. Install Rust with [rustup](https://rustup.rs) (Zed compiles the extension with it).
+1. Zed compiles the extension on your machine, which needs:
+   - Rust from [rustup](https://rustup.rs) with a default toolchain: `rustup default stable`.
+   - A C compiler (`cc`) on the `PATH` that Zed sees, for the build scripts of dependencies,
+     although the extension itself is WebAssembly: `build-essential` on Debian and Ubuntu, `gcc`
+     on Fedora, `base-devel` on Arch, the Xcode Command Line Tools on macOS.
 2. Clone this repository and run `zed: install dev extension` from the command palette, choosing
-   the repository directory.
+   the repository root (the directory with `extension.toml`, not `server`).
 3. Open a TypeScript file. The language server starts with it.
 
 ### The helper binary
@@ -37,7 +41,8 @@ The extension looks for `tsgo-watch-lsp` in this order:
    `aarch64-pc-windows-msvc`), cached in the extension's work directory. If GitHub cannot be
    reached, a previously downloaded binary is used.
 
-Until there is a release, build it yourself and use option 1 or 2:
+To use a helper you built yourself instead of the released one, for example while working on it
+or on a platform without a release asset, build it and use option 1 or 2:
 
 ```sh
 cargo build --release --manifest-path server/Cargo.toml
